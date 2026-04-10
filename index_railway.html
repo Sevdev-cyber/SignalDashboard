@@ -544,9 +544,12 @@ function updateSignals(signals) {
     priceLines = [];
     top.forEach((sig) => {
       const cLabel = sig.direction === 'long' ? '#10b981' : '#ef4444';
-      if(sig.entry) priceLines.push(candleSeries.createPriceLine({ price: sig.entry, color: cLabel, lineWidth: 2, lineStyle: 2, axisLabelVisible: true, title: sig.name + ' ENTRY' }));
-      if(sig.tp1) priceLines.push(candleSeries.createPriceLine({ price: sig.tp1, color: '#06b6d4', lineWidth: 1, lineStyle: 1, axisLabelVisible: true, title: 'TP' }));
-      if(sig.invalidation) priceLines.push(candleSeries.createPriceLine({ price: sig.invalidation, color: '#f59e0b', lineWidth: 1, lineStyle: 1, axisLabelVisible: true, title: 'SL' }));
+      const confStr = sig.confidence_pct ? Math.round(sig.confidence_pct) + '%' : '';
+      const baseName = `${sig.name} ${confStr}`.trim();
+      
+      if(sig.entry) priceLines.push(candleSeries.createPriceLine({ price: sig.entry, color: cLabel, lineWidth: 2, lineStyle: 2, axisLabelVisible: true, title: baseName + ' ENTRY' }));
+      if(sig.tp1) priceLines.push(candleSeries.createPriceLine({ price: sig.tp1, color: '#06b6d4', lineWidth: 1, lineStyle: 1, axisLabelVisible: true, title: baseName + ' TP' }));
+      if(sig.invalidation) priceLines.push(candleSeries.createPriceLine({ price: sig.invalidation, color: '#f59e0b', lineWidth: 1, lineStyle: 1, axisLabelVisible: true, title: baseName + ' SL' }));
     });
   }
 
