@@ -102,7 +102,7 @@ async def push_handler(request):
             await ws.send_str(msg)
         except Exception:
             dead.add(ws)
-    ws_clients -= dead
+    ws_clients.difference_update(dead)
 
     n_signals = len(latest_data.get("signals", []))
     price = latest_data.get("state", {}).get("price", "?")
