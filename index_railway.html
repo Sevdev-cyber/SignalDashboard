@@ -446,16 +446,20 @@ function updateChartHistory(bars) {
   try { candleSeries.setData(unique); } catch(e) { console.error("History setData error:", e); }
 }
 
+let livePriceLine = null;
 function updateChartTick(s) {
-  if (!chart || !candleSeries || !s.price || !s.timestamp) return;
-  const ts = Math.floor(new Date(s.timestamp).getTime() / 1000);
+  if (!chart || !candleSeries || !s.price) return;
   try {
-    candleSeries.update({
-      time: ts,
-      open: s.price,
-      high: s.price,
-      low: s.price,
-      close: s.price
+    if (livePriceLine) {
+      candleSeries.removePriceLine(livePriceLine);
+    }
+    livePriceLine = candleSeries.createPriceLine({
+      price: s.price,
+      color: '#3b82f6',
+      lineWidth: 1,
+      lineStyle: LightweightCharts.LineStyle.Dashed,
+      axisLabelVisible: true,
+      title: 'LIVE',
     });
   } catch(e) { console.error("Tick update error:", e); }
 }
