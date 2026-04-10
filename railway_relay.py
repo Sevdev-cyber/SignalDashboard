@@ -71,8 +71,11 @@ async def ws_handler(request):
 async def push_handler(request):
     # Auth check
     if PUSH_SECRET:
-        token = request.headers.get("X-Push-Secret", "")
-        if token != PUSH_SECRET:
+        # Strip any accidental quotes or spaces the user might have added in Railway panel
+        secret_clean = PUSH_SECRET.strip().strip("'").strip('"')
+        token = request.headers.get("X-Push-Secret", "").strip().strip("'").strip('"')
+        if secret_clean and token != secret_clean:
+            log.warning(f"Rejecting push. Expected: {secret_clean}, got: {token}")
             return web.Response(status=403, text="Forbidden")
 
     try:
