@@ -435,31 +435,32 @@ function initChart() {
 
 function updateChartHistory(bars) {
   if (!chart) initChart();
-  if (!bars || !bars.length) return;
-  // Dedup and sort
-  const unique = [];
-  const times = new Set();
-  for (let b of bars) {
-    if (!times.has(b.time)) { times.add(b.time); unique.push(b); }
-  }
+  if (!chart || !candleSeries) return;
+  const unique = bars.filter((v, i, a) => a.findIndex(t => t.time === v.time) === i);
   unique.sort((a,b) => a.time - b.time);
+  
+  if (unique.length > 0) {
+      const lastBar = unique[unique.length - 1];
+      lastBarTime = lastBar.time;
+      lastBarOpen = lastBar.open;
+      lastBarHigh = lastBar.high;
+      lastBarLow = lastBar.low;
+  }
+  
   try { candleSeries.setData(unique); } catch(e) { console.error("History setData error:", e); }
 }
 
-let livePriceLine = null;
 function updateChartTick(s) {
-  if (!chart || !candleSeries || !s.price) return;
+  if (!chart || !candleSeries || !s.price || !lastBarTime) return;
   try {
-    if (livePriceLine) {
-      candleSeries.removePriceLine(livePriceLine);
-    }
-    livePriceLine = candleSeries.createPriceLine({
-      price: s.price,
-      color: '#3b82f6',
-      lineWidth: 1,
-      lineStyle: LightweightCharts.LineStyle.Dashed,
-      axisLabelVisible: true,
-      title: 'LIVE',
+    lastBarHigh = Math.max(lastBarHigh, s.price);
+    lastBarLow = Math.min(lastBarLow, s.price);
+    candleSeries.update({
+      time: lastBarTime,
+      open: lastBarOpen,
+      high: lastBarHigh,
+      low: lastBarLow,
+      close: s.price
     });
   } catch(e) { console.error("Tick update error:", e); }
 }
