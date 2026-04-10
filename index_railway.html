@@ -388,18 +388,17 @@ function connect() {
   ws.onmessage = (e) => {
     try {
       const d = JSON.parse(e.data);
-      if (d.type === 'full_update') {
-        if (d.bars) updateChartHistory(d.bars);
+      if (d.bars && d.bars.length > 0) updateChartHistory(d.bars);
+      if (d.signals) updateSignals(d.signals);
+      if (d.history) updateHistory(d.history);
+      if (d.state) {
         updateState(d.state);
         updateIndicators(d.state);
-        updateSignals(d.signals);
-        updateZones(d.zones);
-        updateHistory(d.history);
-      } else if (d.type === 'tick_update') {
-        updateState(d.state);
-        updateIndicators(d.state);
-        updateZones(d.zones);
+        if (d.type === 'tick_update') {
+            updateChartTick(d.state);
+        }
       }
+      if (d.zones) updateZones(d.zones);
     } catch(err) {
       console.error("WS Message Error:", err);
     }
