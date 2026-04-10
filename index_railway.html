@@ -6,7 +6,7 @@
 <title>MNQ Signal Radar — Live Dashboard</title>
 <meta name="description" content="Real-time MNQ signal dashboard with confidence scores, confluence analysis, and regime detection">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
-<script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
+<script src="https://unpkg.com/lightweight-charts@4.1.1/dist/lightweight-charts.standalone.production.js"></script>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -400,13 +400,19 @@ function connect() {
         updateIndicators(d.state);
         updateZones(d.zones);
       }
-    } catch(err) {}
+    } catch(err) {
+      console.error("WS Message Error:", err);
+    }
   };
 }
 
 // ═══ CHART ═══
 function initChart() {
   if (chart) return;
+  if (typeof LightweightCharts === 'undefined') {
+    console.error("LightweightCharts is missing!");
+    return;
+  }
   const container = $('tvchart');
   chart = LightweightCharts.createChart(container, {
     layout: { background: { type: 'solid', color: '#1a1f35' }, textColor: '#94a3b8' },
@@ -805,7 +811,11 @@ function mk(tag, cls, text) { const e = document.createElement(tag); e.className
 function confClass(pct) { return pct >= 70 ? 'high' : pct >= 45 ? 'medium' : 'low'; }
 
 // ═══ INIT ═══
-initChart();
+try {
+  initChart();
+} catch(e) {
+  console.error("Chart init failed:", e);
+}
 connect();
 </script>
 </body>
