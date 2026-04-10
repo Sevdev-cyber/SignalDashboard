@@ -69,14 +69,14 @@ async def ws_handler(request):
 
 # ── Push endpoint (receives data from local signal_server) ──
 async def push_handler(request):
-    # Auth check
+    # Auth check: accept either what's in Railway env OR the fallback
+    token = request.headers.get("X-Push-Secret", "").strip().strip("'").strip('"')
+    accepted = ["SacredForestSignal1234"]
     if PUSH_SECRET:
-        # Strip any accidental quotes or spaces the user might have added in Railway panel
-        secret_clean = PUSH_SECRET.strip().strip("'").strip('"')
-        token = request.headers.get("X-Push-Secret", "").strip().strip("'").strip('"')
-        if secret_clean and token != secret_clean:
-            log.warning(f"Rejecting push. Expected: {secret_clean}, got: {token}")
-            return web.Response(status=403, text="Forbidden")
+        accepted.append(PUSH_SECRET.strip().strip("'").strip('"'))
+        
+    if token not in accepted:
+        return web.Response(status=403, text="Forbidden")
 
     try:
         data = await request.json()
