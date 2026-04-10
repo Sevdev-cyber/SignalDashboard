@@ -444,7 +444,7 @@ function updateChartHistory(bars) {
     if (!times.has(b.time)) { times.add(b.time); unique.push(b); }
   }
   unique.sort((a,b) => a.time - b.time);
-  try { candleSeries.setData(unique); } catch(e) {}
+  try { candleSeries.setData(unique); } catch(e) { console.error("History setData error:", e); }
 }
 
 function updateChartTick(s) {
@@ -458,7 +458,7 @@ function updateChartTick(s) {
       low: s.price,
       close: s.price
     });
-  } catch(e) {}
+  } catch(e) { console.error("Tick update error:", e); }
 }
 
 // ═══ STATE ═══
