@@ -1,0 +1,729 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MNQ Signal Radar — Live Dashboard</title>
+<meta name="description" content="Real-time MNQ signal dashboard with confidence scores, confluence analysis, and regime detection">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg-primary:#0a0e1a;--bg-secondary:#111827;--bg-card:#1a1f35;--bg-card-hover:#222845;
+  --border:#2a3050;--border-glow:#3b82f6;
+  --text-primary:#e2e8f0;--text-secondary:#94a3b8;--text-muted:#64748b;
+  --accent-blue:#3b82f6;--accent-cyan:#06b6d4;--accent-purple:#8b5cf6;
+  --long:#10b981;--long-glow:rgba(16,185,129,.25);--long-bg:rgba(16,185,129,.08);
+  --short:#ef4444;--short-glow:rgba(239,68,68,.25);--short-bg:rgba(239,68,68,.08);
+  --gold:#f59e0b;--gold-glow:rgba(245,158,11,.3);
+  --radius:12px;--radius-sm:8px;
+}
+html{font-size:14px}
+body{font-family:'Inter',system-ui,sans-serif;background:var(--bg-primary);color:var(--text-primary);min-height:100vh;overflow-x:hidden}
+
+/* ═══ HEADER ═══ */
+.header{background:linear-gradient(135deg,#0f172a 0%,#1e1b4b 50%,#0f172a 100%);border-bottom:1px solid var(--border);padding:12px 24px;display:flex;align-items:center;gap:20px;position:sticky;top:0;z-index:100;backdrop-filter:blur(20px)}
+.logo{font-size:1.4rem;font-weight:800;background:linear-gradient(135deg,var(--accent-cyan),var(--accent-purple));-webkit-background-clip:text;-webkit-text-fill-color:transparent;letter-spacing:-0.5px;white-space:nowrap}
+.logo span{font-weight:400;opacity:.7}
+.price-block{display:flex;align-items:baseline;gap:8px;padding:6px 16px;background:rgba(255,255,255,.04);border-radius:var(--radius-sm);border:1px solid var(--border)}
+.price-value{font-family:'JetBrains Mono',monospace;font-size:1.6rem;font-weight:700;color:#fff}
+.price-change{font-size:.85rem;font-weight:600}
+.price-change.up{color:var(--long)}
+.price-change.down{color:var(--short)}
+.header-badges{display:flex;gap:8px;flex-wrap:wrap;margin-left:auto}
+
+.badge{padding:4px 10px;border-radius:20px;font-size:.72rem;font-weight:600;text-transform:uppercase;letter-spacing:.5px;border:1px solid}
+.badge.regime-trend_up{background:var(--long-bg);border-color:var(--long);color:var(--long)}
+.badge.regime-trend_down{background:var(--short-bg);border-color:var(--short);color:var(--short)}
+.badge.regime-range{background:rgba(139,92,246,.1);border-color:var(--accent-purple);color:var(--accent-purple)}
+.badge.regime-transition{background:rgba(245,158,11,.1);border-color:var(--gold);color:var(--gold)}
+.badge.regime-chop{background:rgba(100,116,139,.1);border-color:var(--text-muted);color:var(--text-muted)}
+.badge.regime-unknown{background:rgba(100,116,139,.1);border-color:var(--text-muted);color:var(--text-muted)}
+.badge.ema-BULLISH{background:var(--long-bg);border-color:var(--long);color:var(--long)}
+.badge.ema-BEARISH{background:var(--short-bg);border-color:var(--short);color:var(--short)}
+.badge.ema-NEUTRAL{background:rgba(100,116,139,.1);border-color:var(--text-muted);color:var(--text-muted)}
+.badge.vwap-ABOVE{color:var(--long);border-color:var(--long);background:var(--long-bg)}
+.badge.vwap-BELOW{color:var(--short);border-color:var(--short);background:var(--short-bg)}
+.badge.time{background:rgba(6,182,212,.1);border-color:var(--accent-cyan);color:var(--accent-cyan)}
+.badge.day{background:rgba(139,92,246,.1);border-color:var(--accent-purple);color:var(--accent-purple)}
+
+.ws-status{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+.ws-status.connected{background:var(--long);box-shadow:0 0 8px var(--long-glow)}
+.ws-status.disconnected{background:var(--short);box-shadow:0 0 8px var(--short-glow);animation:pulse 1.5s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+
+/* ═══ STATS BAR ═══ */
+.stats-bar{display:flex;gap:20px;padding:10px 24px;background:var(--bg-secondary);border-bottom:1px solid var(--border);overflow-x:auto}
+.stat{display:flex;flex-direction:column;min-width:80px}
+.stat-label{font-size:.65rem;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted);margin-bottom:2px}
+.stat-value{font-family:'JetBrains Mono',monospace;font-size:.9rem;font-weight:600;color:var(--text-primary)}
+.stat-value.positive{color:var(--long)}
+.stat-value.negative{color:var(--short)}
+
+/* ═══ MAIN LAYOUT ═══ */
+.main{display:grid;grid-template-columns:1fr 320px;gap:0;min-height:calc(100vh - 100px)}
+
+/* ═══ SIGNALS PANEL ═══ */
+.signals-panel{padding:16px 20px;overflow-y:auto}
+.section-title{font-size:1rem;font-weight:700;color:var(--text-primary);margin-bottom:12px;display:flex;align-items:center;gap:8px}
+.section-title .count{font-size:.75rem;background:var(--accent-blue);color:#fff;padding:2px 8px;border-radius:12px;font-weight:600}
+.section-title .gold{background:var(--gold)}
+
+/* ═══ TOP SIGNALS (hero cards) ═══ */
+.top-signals{display:grid;grid-template-columns:repeat(auto-fill,minmax(380px,1fr));gap:14px;margin-bottom:24px}
+
+.hero-card{background:linear-gradient(145deg,var(--bg-card) 0%,#1e2440 100%);border:1px solid var(--border);border-radius:var(--radius);padding:20px;position:relative;overflow:hidden;transition:all .25s}
+.hero-card:hover{border-color:var(--border-glow);transform:translateY(-3px);box-shadow:0 12px 32px rgba(0,0,0,.4)}
+.hero-card.long{border-left:4px solid var(--long)}
+.hero-card.short{border-left:4px solid var(--short)}
+.hero-card::before{content:'';position:absolute;top:0;left:0;right:0;height:3px}
+.hero-card.long::before{background:linear-gradient(90deg,var(--long),rgba(16,185,129,.1))}
+.hero-card.short::before{background:linear-gradient(90deg,var(--short),rgba(239,68,68,.1))}
+.hero-card .rank{position:absolute;top:12px;right:14px;font-family:'JetBrains Mono',monospace;font-size:.7rem;font-weight:700;color:var(--text-muted);opacity:.5}
+
+.hero-header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px}
+.hero-name{font-size:1.1rem;font-weight:800;display:flex;align-items:center;gap:8px}
+.dir-badge{font-size:.72rem;padding:3px 8px;border-radius:5px;font-weight:700;text-transform:uppercase;letter-spacing:.3px}
+.dir-badge.long{background:var(--long-bg);color:var(--long);border:1px solid rgba(16,185,129,.3)}
+.dir-badge.short{background:var(--short-bg);color:var(--short);border:1px solid rgba(239,68,68,.3)}
+
+.hero-conf{text-align:right}
+.hero-conf-value{font-family:'JetBrains Mono',monospace;font-size:2rem;font-weight:900;line-height:1}
+.hero-conf-value.high{color:var(--long)}
+.hero-conf-value.medium{color:var(--gold)}
+.hero-conf-value.low{color:var(--short)}
+.hero-conf-label{font-size:.6rem;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted)}
+.hero-conf-bar{width:90px;height:5px;background:rgba(255,255,255,.08);border-radius:4px;margin-top:5px;overflow:hidden}
+.hero-conf-bar-fill{height:100%;border-radius:4px;transition:width .5s ease}
+.hero-conf-bar-fill.high{background:linear-gradient(90deg,var(--long),#34d399)}
+.hero-conf-bar-fill.medium{background:linear-gradient(90deg,var(--gold),#fbbf24)}
+.hero-conf-bar-fill.low{background:linear-gradient(90deg,var(--short),#f87171)}
+
+/* Confluence row */
+.hero-confluence{font-size:.72rem;color:var(--text-muted);margin-bottom:8px;display:flex;align-items:center;gap:6px}
+.hero-confluence strong{color:var(--text-primary);font-size:.85rem}
+.conf-mini{display:inline-flex;gap:3px;flex-wrap:wrap;margin-left:4px}
+.conf-mini-chip{font-size:.58rem;padding:1px 5px;border-radius:3px;background:var(--long-bg);color:var(--long);border:1px solid rgba(16,185,129,.25)}
+
+/* Levels grid */
+.hero-levels{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin:10px 0;font-size:.8rem}
+.hero-level{padding:6px 8px;border-radius:6px;background:rgba(255,255,255,.03);text-align:center}
+.hero-level-label{font-size:.6rem;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted);margin-bottom:2px}
+.hero-level-price{font-family:'JetBrains Mono',monospace;font-weight:700;font-size:.9rem}
+.hero-level-price.entry{color:var(--text-primary)}
+.hero-level-price.tp{color:var(--long)}
+.hero-level-price.sl{color:var(--short)}
+
+/* Reasons + meta */
+.hero-reasons{display:flex;flex-wrap:wrap;gap:3px;margin-top:8px}
+.reason{font-size:.6rem;padding:2px 6px;border-radius:3px;background:rgba(59,130,246,.1);color:var(--accent-blue);border:1px solid rgba(59,130,246,.2)}
+.hero-meta{display:flex;justify-content:space-between;align-items:center;margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,.06);font-size:.72rem;color:var(--text-muted)}
+
+/* ═══ COLLAPSED REST ═══ */
+.rest-toggle{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:12px 16px;cursor:pointer;display:flex;align-items:center;justify-content:space-between;transition:all .2s;margin-bottom:10px;user-select:none}
+.rest-toggle:hover{background:var(--bg-card-hover);border-color:var(--border-glow)}
+.rest-toggle .label{font-size:.85rem;font-weight:600;display:flex;align-items:center;gap:8px}
+.rest-toggle .arrow{font-size:1rem;transition:transform .3s}
+.rest-toggle.open .arrow{transform:rotate(180deg)}
+
+.rest-signals{max-height:0;overflow:hidden;transition:max-height .4s ease}
+.rest-signals.open{max-height:5000px}
+
+/* Mini signal cards for collapsed section */
+.mini-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:8px;padding-bottom:16px}
+.mini-card{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px 12px;display:flex;align-items:center;gap:10px;transition:all .2s;cursor:default}
+.mini-card:hover{background:var(--bg-card-hover);border-color:rgba(59,130,246,.3)}
+.mini-card.long{border-left:3px solid var(--long)}
+.mini-card.short{border-left:3px solid var(--short)}
+.mini-dir{width:28px;text-align:center}
+.mini-dir .arrow{font-size:.9rem;font-weight:700}
+.mini-dir .arrow.long{color:var(--long)}
+.mini-dir .arrow.short{color:var(--short)}
+.mini-info{flex:1;min-width:0}
+.mini-name{font-size:.78rem;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.mini-detail{font-size:.65rem;color:var(--text-muted);display:flex;gap:8px;margin-top:2px}
+.mini-conf{font-family:'JetBrains Mono',monospace;font-weight:700;font-size:.9rem;min-width:36px;text-align:right}
+.mini-conf.high{color:var(--long)}
+.mini-conf.medium{color:var(--gold)}
+.mini-conf.low{color:var(--short)}
+.mini-levels{font-family:'JetBrains Mono',monospace;font-size:.65rem;color:var(--text-muted);text-align:right;min-width:90px}
+.mini-levels .tp{color:var(--long)}
+.mini-levels .sl{color:var(--short)}
+
+/* ═══ RIGHT PANEL ═══ */
+.right-panel{background:var(--bg-secondary);border-left:1px solid var(--border);padding:16px;overflow-y:auto;display:flex;flex-direction:column;gap:16px}
+
+/* Regime Meter */
+.regime-meter{background:var(--bg-card);border-radius:var(--radius);padding:16px;border:1px solid var(--border)}
+.regime-label{font-size:1.6rem;font-weight:900;text-align:center;text-transform:uppercase;letter-spacing:1px;margin:8px 0}
+.regime-label.trend_up{color:var(--long)}
+.regime-label.trend_down{color:var(--short)}
+.regime-label.range{color:var(--accent-purple)}
+.regime-label.transition{color:var(--gold)}
+.regime-label.chop,.regime-label.unknown{color:var(--text-muted)}
+.regime-bar{display:flex;gap:2px;margin-top:8px}
+.regime-segment{flex:1;height:6px;border-radius:3px;opacity:.15;transition:opacity .3s}
+.regime-segment.active{opacity:1}
+.regime-segment:nth-child(1){background:var(--short)}
+.regime-segment:nth-child(2){background:var(--gold)}
+.regime-segment:nth-child(3){background:var(--accent-purple)}
+.regime-segment:nth-child(4){background:var(--gold)}
+.regime-segment:nth-child(5){background:var(--long)}
+
+/* Verdict */
+.verdict-box{background:var(--bg-card);border-radius:var(--radius);padding:14px;border:1px solid var(--border)}
+.verdict-title{font-size:.7rem;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted);margin-bottom:6px}
+.verdict-text{font-size:.85rem;font-weight:500;line-height:1.5;color:var(--text-secondary)}
+.verdict-text strong{color:var(--text-primary)}
+
+/* Signal History */
+.history-list{display:flex;flex-direction:column;gap:5px;max-height:350px;overflow-y:auto}
+.history-item{display:flex;align-items:center;gap:8px;padding:7px 8px;background:var(--bg-card);border-radius:var(--radius-sm);border:1px solid var(--border);font-size:.75rem;transition:all .3s}
+.history-item.new{animation:slideIn .3s ease-out}
+@keyframes slideIn{from{opacity:0;transform:translateX(-10px)}to{opacity:1;transform:translateX(0)}}
+.hist-dir{width:5px;height:22px;border-radius:3px;flex-shrink:0}
+.hist-dir.long{background:var(--long)}
+.hist-dir.short{background:var(--short)}
+.hist-name{font-weight:600;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.hist-conf{font-family:'JetBrains Mono',monospace;font-weight:700;min-width:32px;text-align:right}
+.hist-time{color:var(--text-muted);font-size:.65rem;min-width:40px;text-align:right}
+
+/* Empty State */
+.empty-state{text-align:center;padding:60px 20px;color:var(--text-muted)}
+.empty-state .icon{font-size:3rem;margin-bottom:12px;opacity:.3}
+.empty-state .title{font-size:1.1rem;font-weight:600;margin-bottom:4px;color:var(--text-secondary)}
+.empty-state .desc{font-size:.8rem}
+
+/* ─── Indicators ─── */
+.indicators-box{background:var(--bg-card);border-radius:var(--radius);padding:14px;border:1px solid var(--border)}
+.ind-grid{display:grid;grid-template-columns:1fr 1fr;gap:4px}
+.ind{display:flex;justify-content:space-between;align-items:center;padding:4px 8px;border-radius:5px;background:rgba(255,255,255,.02);font-size:.75rem}
+.ind-label{color:var(--text-muted);font-weight:500}
+.ind-val{font-family:'JetBrains Mono',monospace;font-weight:600;font-size:.78rem}
+.ind-val.bull{color:var(--long)}
+.ind-val.bear{color:var(--short)}
+.ind-val.warn{color:var(--gold)}
+.ind-val.hot{color:#f97316}
+
+/* ─── Zones ─── */
+.zones-box{background:var(--bg-card);border-radius:var(--radius);padding:14px;border:1px solid var(--border)}
+.zones-content{display:flex;flex-direction:column;gap:10px}
+.zones-empty{color:var(--text-muted);font-size:.78rem;text-align:center;padding:8px}
+.zone-block{border-radius:var(--radius-sm);padding:10px;border:1px solid}
+.zone-block.long{border-color:rgba(16,185,129,.3);background:rgba(16,185,129,.04)}
+.zone-block.short{border-color:rgba(239,68,68,.3);background:rgba(239,68,68,.04)}
+.zone-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
+.zone-dir{font-size:.75rem;font-weight:700;text-transform:uppercase}
+.zone-dir.long{color:var(--long)}
+.zone-dir.short{color:var(--short)}
+.zone-count{font-size:.65rem;color:var(--text-muted)}
+.zone-levels{display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px;font-size:.72rem}
+.zone-lvl{text-align:center;padding:4px;border-radius:4px;background:rgba(255,255,255,.03)}
+.zone-lvl-label{font-size:.58rem;text-transform:uppercase;color:var(--text-muted);letter-spacing:.3px}
+.zone-lvl-price{font-family:'JetBrains Mono',monospace;font-weight:700;font-size:.85rem}
+.zone-lvl-range{font-size:.55rem;color:var(--text-muted);margin-top:1px}
+.zone-lvl-price.entry{color:var(--text-primary)}
+.zone-lvl-price.tp{color:var(--long)}
+.zone-lvl-price.sl{color:var(--short)}
+
+/* Scrollbar */
+::-webkit-scrollbar{width:6px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+::-webkit-scrollbar-thumb:hover{background:var(--text-muted)}
+
+@media(max-width:900px){
+  .main{grid-template-columns:1fr}
+  .right-panel{border-left:none;border-top:1px solid var(--border)}
+  .header{flex-wrap:wrap;gap:10px}
+  .top-signals{grid-template-columns:1fr}
+}
+</style>
+</head>
+<body>
+
+<!-- ═══ HEADER ═══ -->
+<header class="header" id="header">
+  <div class="ws-status disconnected" id="wsStatus" title="WebSocket disconnected"></div>
+  <div class="logo">SIGNAL RADAR <span>MNQ</span></div>
+  <div class="price-block">
+    <span class="price-value" id="livePrice">—</span>
+    <span class="price-change" id="priceChange"></span>
+  </div>
+  <div class="header-badges" id="headerBadges">
+    <span class="badge regime-unknown" id="badgeRegime">CONNECTING…</span>
+  </div>
+</header>
+
+<!-- ═══ STATS BAR ═══ -->
+<div class="stats-bar" id="statsBar">
+  <div class="stat"><span class="stat-label">ATR</span><span class="stat-value" id="statAtr">—</span></div>
+  <div class="stat"><span class="stat-label">VWAP</span><span class="stat-value" id="statVwap">—</span></div>
+  <div class="stat"><span class="stat-label">EMA 20</span><span class="stat-value" id="statEma20">—</span></div>
+  <div class="stat"><span class="stat-label">EMA 50</span><span class="stat-value" id="statEma50">—</span></div>
+  <div class="stat"><span class="stat-label">Delta</span><span class="stat-value" id="statDelta">—</span></div>
+  <div class="stat"><span class="stat-label">Top Signals</span><span class="stat-value" id="statSignals">0</span></div>
+  <div class="stat"><span class="stat-label">Total</span><span class="stat-value" id="statTotal">0</span></div>
+  <div class="stat"><span class="stat-label">Updated</span><span class="stat-value" id="statTime">—</span></div>
+</div>
+
+<!-- ═══ MAIN ═══ -->
+<div class="main">
+
+  <!-- LEFT: Signals -->
+  <div class="signals-panel">
+
+    <!-- TOP SIGNALS -->
+    <div class="section-title">
+      🔥 Top Signals <span class="count gold" id="topCount">0</span>
+    </div>
+    <div class="top-signals" id="topSignals">
+      <div class="empty-state">
+        <div class="icon">📡</div>
+        <div class="title">Waiting for signals…</div>
+        <div class="desc">Connect to NinjaTrader or start in demo mode</div>
+      </div>
+    </div>
+
+    <!-- REST (collapsed) -->
+    <div class="rest-toggle" id="restToggle" onclick="toggleRest()" style="display:none">
+      <div class="label">📋 Remaining Signals <span class="count" id="restCount">0</span></div>
+      <div class="arrow">▼</div>
+    </div>
+    <div class="rest-signals" id="restSignals">
+      <div class="mini-grid" id="miniGrid"></div>
+    </div>
+
+  </div>
+
+  <!-- RIGHT: Context -->
+  <div class="right-panel">
+
+    <!-- Regime -->
+    <div class="regime-meter" id="regimeMeter">
+      <div class="section-title">Market Regime</div>
+      <div class="regime-label unknown" id="regimeLabel">CONNECTING</div>
+      <div class="regime-bar">
+        <div class="regime-segment" data-regime="trend_down"></div>
+        <div class="regime-segment" data-regime="transition"></div>
+        <div class="regime-segment" data-regime="range"></div>
+        <div class="regime-segment" data-regime="transition2"></div>
+        <div class="regime-segment" data-regime="trend_up"></div>
+      </div>
+    </div>
+
+    <!-- Indicators -->
+    <div class="indicators-box" id="indicatorsBox">
+      <div class="section-title">📊 Indicators</div>
+      <div class="ind-grid" id="indGrid">
+        <div class="ind" id="indRsi"><span class="ind-label">RSI</span><span class="ind-val">—</span></div>
+        <div class="ind" id="indCvd"><span class="ind-label">CVD</span><span class="ind-val">—</span></div>
+        <div class="ind" id="indCvdTrend"><span class="ind-label">CVD Trend</span><span class="ind-val">—</span></div>
+        <div class="ind" id="indDeltaStreak"><span class="ind-label">Δ Streak</span><span class="ind-val">—</span></div>
+        <div class="ind" id="indVolume"><span class="ind-label">Volume</span><span class="ind-val">—</span></div>
+        <div class="ind" id="indVolRatio"><span class="ind-label">Vol/Avg</span><span class="ind-val">—</span></div>
+        <div class="ind" id="indVwapDist"><span class="ind-label">VWAP Dist</span><span class="ind-val">—</span></div>
+        <div class="ind" id="indBarRange"><span class="ind-label">Bar Range</span><span class="ind-val">—</span></div>
+        <div class="ind" id="indBarBody"><span class="ind-label">Body %</span><span class="ind-val">—</span></div>
+        <div class="ind" id="indBarPos"><span class="ind-label">Close Pos</span><span class="ind-val">—</span></div>
+      </div>
+    </div>
+
+    <!-- Weighted Zones -->
+    <div class="zones-box" id="zonesBox">
+      <div class="section-title">🎯 Weighted Zones</div>
+      <div id="zonesContent" class="zones-content">
+        <div class="zones-empty">No signals</div>
+      </div>
+    </div>
+
+    <!-- Auto verdict -->
+    <div class="verdict-box" id="verdictBox">
+      <div class="verdict-title">🧠 Co to znaczy?</div>
+      <div class="verdict-text" id="verdictText">Ładowanie…</div>
+    </div>
+
+    <!-- History -->
+    <div>
+      <div class="section-title">Signal History <span class="count" id="historyCount">0</span></div>
+      <div class="history-list" id="historyList">
+        <div class="empty-state" style="padding:20px">
+          <div class="desc">No history yet</div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+const WS_URL = `ws://${location.hostname || 'localhost'}:8080`;
+const TOP_N = 8;
+let ws = null;
+let reconnectTimer = null;
+let lastPrice = 0;
+let restOpen = false;
+
+function connect() {
+  ws = new WebSocket(WS_URL);
+  ws.onopen = () => {
+    $('wsStatus').className = 'ws-status connected';
+    $('wsStatus').title = 'Connected';
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  };
+  ws.onclose = () => {
+    $('wsStatus').className = 'ws-status disconnected';
+    reconnectTimer = setTimeout(connect, 3000);
+  };
+  ws.onerror = () => {};
+  ws.onmessage = (e) => {
+    try {
+      const d = JSON.parse(e.data);
+      if (d.type === 'full_update') {
+        updateState(d.state);
+        updateIndicators(d.state);
+        updateSignals(d.signals);
+        updateZones(d.zones);
+        updateHistory(d.history);
+      } else if (d.type === 'tick_update') {
+        updateState(d.state);
+        updateIndicators(d.state);
+        updateZones(d.zones);
+      }
+    } catch(err) {}
+  };
+}
+
+// ═══ STATE ═══
+function updateState(s) {
+  if (!s) return;
+  if (s.price) {
+    $('livePrice').textContent = s.price.toFixed(2);
+    if (lastPrice) {
+      const d = s.price - lastPrice;
+      $('priceChange').textContent = (d >= 0 ? '+' : '') + d.toFixed(2);
+      $('priceChange').className = 'price-change ' + (d >= 0 ? 'up' : 'down');
+    }
+    lastPrice = s.price;
+  }
+  txt('statAtr', s.atr?.toFixed(1) || '—');
+  txt('statVwap', s.vwap?.toFixed(2) || '—');
+  txt('statEma20', s.ema20?.toFixed(2) || '—');
+  txt('statEma50', s.ema50?.toFixed(2) || '—');
+  const de = $('statDelta');
+  if (s.delta_pct !== undefined) {
+    de.textContent = (s.delta_pct >= 0 ? '+' : '') + s.delta_pct.toFixed(0) + '%';
+    de.className = 'stat-value ' + (s.delta_pct > 5 ? 'positive' : s.delta_pct < -5 ? 'negative' : '');
+  }
+  if (s.timestamp) txt('statTime', new Date(s.timestamp).toLocaleTimeString());
+
+  // Badges
+  const b = $('headerBadges'); b.innerHTML = '';
+  if (s.regime) b.appendChild(mk('span', `badge regime-${s.regime}`, s.regime.replace('_',' ')));
+  if (s.ema_stack) b.appendChild(mk('span', `badge ema-${s.ema_stack}`, `EMA ${s.ema_stack}`));
+  if (s.vwap_pos) b.appendChild(mk('span', `badge vwap-${s.vwap_pos}`, `VWAP ${s.vwap_pos}`));
+  if (s.time_label) b.appendChild(mk('span', 'badge time', s.time_label));
+  if (s.day_label) b.appendChild(mk('span', 'badge day', s.day_label));
+
+  // Regime meter
+  const rl = $('regimeLabel');
+  rl.textContent = (s.regime || 'unknown').replace('_',' ').toUpperCase();
+  rl.className = 'regime-label ' + (s.regime || 'unknown');
+  document.querySelectorAll('.regime-segment').forEach(seg => {
+    const r = seg.dataset.regime;
+    const match = r === s.regime || (r === 'transition2' && s.regime === 'transition');
+    seg.classList.toggle('active', match);
+  });
+}
+
+// ═══ SIGNALS ═══
+function updateSignals(signals) {
+  if (!signals) signals = [];
+
+  // Dedupe by source_type — keep only the highest confidence per type
+  const seen = {};
+  const deduped = [];
+  for (const sig of signals) {
+    const key = sig.source_type || sig.name;
+    if (!seen[key] || sig.confidence_pct > seen[key].confidence_pct) {
+      seen[key] = sig;
+    }
+  }
+  for (const k of Object.keys(seen)) deduped.push(seen[k]);
+  deduped.sort((a,b) => b.confidence_pct - a.confidence_pct);
+
+  const top = deduped.slice(0, TOP_N);
+  const rest = deduped.slice(TOP_N);
+
+  txt('topCount', top.length);
+  txt('statSignals', top.length);
+  txt('statTotal', deduped.length);
+
+  // TOP cards
+  const topEl = $('topSignals');
+  if (top.length === 0) {
+    topEl.innerHTML = `<div class="empty-state"><div class="icon">🔇</div><div class="title">No active signals</div><div class="desc">Waiting for next bar close…</div></div>`;
+  } else {
+    topEl.innerHTML = '';
+    top.forEach((sig, i) => topEl.appendChild(createHeroCard(sig, i + 1)));
+  }
+
+  // REST toggle + cards
+  const toggle = $('restToggle');
+  if (rest.length > 0) {
+    toggle.style.display = 'flex';
+    txt('restCount', rest.length);
+    const miniGrid = $('miniGrid');
+    miniGrid.innerHTML = '';
+    rest.forEach(sig => miniGrid.appendChild(createMiniCard(sig)));
+  } else {
+    toggle.style.display = 'none';
+  }
+
+  // Verdict
+  buildVerdict(top, deduped);
+}
+
+function createHeroCard(sig, rank) {
+  const card = document.createElement('div');
+  card.className = `hero-card ${sig.direction}`;
+  const cc = confClass(sig.confidence_pct);
+
+  // Top confirming signals (max 4)
+  let chips = '';
+  if (sig.confirming_signals) {
+    sig.confirming_signals.slice(0, 4).forEach(n => {
+      chips += `<span class="conf-mini-chip">✓ ${n}</span>`;
+    });
+  }
+
+  let reasons = '';
+  if (sig.reasons) sig.reasons.slice(0, 5).forEach(r => { reasons += `<span class="reason">${r}</span>`; });
+
+  card.innerHTML = `
+    <div class="rank">#${rank}</div>
+    <div class="hero-header">
+      <div class="hero-name">
+        <span class="dir-badge ${sig.direction}">${sig.direction === 'long' ? '▲ LONG' : '▼ SHORT'}</span>
+        ${sig.name}
+      </div>
+      <div class="hero-conf">
+        <div class="hero-conf-value ${cc}">${sig.confidence_pct}%</div>
+        <div class="hero-conf-label">confidence</div>
+        <div class="hero-conf-bar"><div class="hero-conf-bar-fill ${cc}" style="width:${sig.confidence_pct}%"></div></div>
+      </div>
+    </div>
+    ${sig.confluence_count > 0 ? `<div class="hero-confluence">Confluence: <strong>${sig.confluence_count}</strong> <span class="conf-mini">${chips}</span></div>` : ''}
+    <div class="hero-levels">
+      <div class="hero-level"><div class="hero-level-label">Entry</div><div class="hero-level-price entry">${sig.entry?.toFixed(2)}</div></div>
+      <div class="hero-level"><div class="hero-level-label">🎯 Target</div><div class="hero-level-price tp">${sig.tp1?.toFixed(2)}</div></div>
+      <div class="hero-level"><div class="hero-level-label">🚫 Invalid.</div><div class="hero-level-price sl">${sig.invalidation?.toFixed(2)}</div></div>
+    </div>
+    <div class="hero-reasons">${reasons}</div>
+    <div class="hero-meta">
+      <span>${sig.regime_match ? '✅ Regime OK' : '⚠️ Counter-regime'} · Risk ${sig.risk_pts?.toFixed(1)}pt · R:R ${sig.rr_ratio}:1</span>
+      <span>${sig.time_edge} · Δ${sig.delta_pct > 0 ? '+' : ''}${sig.delta_pct}%</span>
+    </div>
+  `;
+  return card;
+}
+
+function createMiniCard(sig) {
+  const card = document.createElement('div');
+  card.className = `mini-card ${sig.direction}`;
+  const cc = confClass(sig.confidence_pct);
+  card.innerHTML = `
+    <div class="mini-dir"><span class="arrow ${sig.direction}">${sig.direction === 'long' ? '▲' : '▼'}</span></div>
+    <div class="mini-info">
+      <div class="mini-name">${sig.name}</div>
+      <div class="mini-detail">
+        <span>Risk ${sig.risk_pts?.toFixed(1)}pt</span>
+        <span>R:R ${sig.rr_ratio}:1</span>
+        <span>${sig.regime_match ? '✅' : '⚠️'}</span>
+      </div>
+    </div>
+    <div class="mini-conf ${cc}">${sig.confidence_pct}%</div>
+    <div class="mini-levels">
+      <div>🎯 <span class="tp">${sig.tp1?.toFixed(2)}</span></div>
+      <div>🚫 <span class="sl">${sig.invalidation?.toFixed(2)}</span></div>
+    </div>
+  `;
+  return card;
+}
+
+function toggleRest() {
+  restOpen = !restOpen;
+  $('restToggle').classList.toggle('open', restOpen);
+  $('restSignals').classList.toggle('open', restOpen);
+}
+
+// ═══ VERDICT (auto summary in Polish) ═══
+function buildVerdict(top, all) {
+  if (all.length === 0) {
+    txt('verdictText', 'Brak sygnałów — czekam na dane…');
+    return;
+  }
+
+  const longs = top.filter(s => s.direction === 'long').length;
+  const shorts = top.filter(s => s.direction === 'short').length;
+  const bestSig = top[0];
+  const avgConf = Math.round(top.reduce((s,x) => s + x.confidence_pct, 0) / top.length);
+
+  let bias = '';
+  if (longs > shorts * 2) bias = '🟢 <strong>Silny LONG bias</strong> — większość sygnałów bullish.';
+  else if (shorts > longs * 2) bias = '🔴 <strong>Silny SHORT bias</strong> — większość sygnałów bearish.';
+  else if (longs > shorts) bias = '🟡 Lekki long bias, ale podzielone sygnały.';
+  else if (shorts > longs) bias = '🟡 Lekki short bias, ale podzielone sygnały.';
+  else bias = '⚪ <strong>Brak dominacji</strong> — sygnały neutralne.';
+
+  let quality = '';
+  if (avgConf >= 70) quality = '🔥 Wysoka pewność (śr. ' + avgConf + '%) — silne setupy.';
+  else if (avgConf >= 45) quality = '⚡ Średnia pewność (śr. ' + avgConf + '%) — ostrożnie.';
+  else quality = '⚠️ Niska pewność (śr. ' + avgConf + '%) — lepiej czekać.';
+
+  let bestLine = '';
+  if (bestSig) {
+    bestLine = `Najlepszy: <strong>${bestSig.name} ${bestSig.direction.toUpperCase()}</strong> (${bestSig.confidence_pct}%), TP ${bestSig.tp1?.toFixed(0)}, SL ${bestSig.invalidation?.toFixed(0)}.`;
+  }
+
+  $('verdictText').innerHTML = `${bias}<br>${quality}<br>${bestLine}`;
+}
+
+// ═══ HISTORY ═══
+function updateHistory(history) {
+  const list = $('historyList');
+  txt('historyCount', history ? history.length : 0);
+  if (!history || history.length === 0) {
+    list.innerHTML = '<div class="empty-state" style="padding:20px"><div class="desc">No history yet</div></div>';
+    return;
+  }
+  list.innerHTML = '';
+  history.slice(0, 25).forEach((sig, i) => {
+    const item = document.createElement('div');
+    item.className = `history-item${i === 0 ? ' new' : ''}`;
+    const cc = confClass(sig.confidence_pct);
+    let ts = '';
+    if (sig.timestamp) ts = new Date(sig.timestamp).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'});
+    item.innerHTML = `
+      <div class="hist-dir ${sig.direction}"></div>
+      <span class="hist-name">${sig.name}</span>
+      <span class="hist-conf" style="color:var(--${cc === 'high' ? 'long' : cc === 'medium' ? 'gold' : 'short'})">${sig.confidence_pct}%</span>
+      <span class="hist-time">${ts}</span>
+    `;
+    list.appendChild(item);
+  });
+}
+
+// ═══ INDICATORS ═══
+function updateIndicators(s) {
+  if (!s) return;
+
+  // RSI
+  setInd('indRsi', s.rsi?.toFixed(0) || '—',
+    s.rsi > 70 ? 'bear' : s.rsi < 30 ? 'bull' : s.rsi > 60 ? 'warn' : s.rsi < 40 ? 'warn' : '');
+
+  // CVD
+  setInd('indCvd', fmtK(s.cum_delta) || '—',
+    s.cum_delta > 0 ? 'bull' : s.cum_delta < 0 ? 'bear' : '');
+
+  // CVD Trend
+  setInd('indCvdTrend', s.cvd_trend || '—',
+    s.cvd_trend === 'RISING' ? 'bull' : s.cvd_trend === 'FALLING' ? 'bear' : '');
+
+  // Delta streak
+  setInd('indDeltaStreak', s.delta_streak !== undefined ? (s.delta_streak > 0 ? '+' : '') + s.delta_streak : '—',
+    s.delta_streak > 2 ? 'bull' : s.delta_streak < -2 ? 'bear' : '');
+
+  // Volume
+  setInd('indVolume', fmtK(s.volume) || '—', '');
+
+  // Vol ratio
+  setInd('indVolRatio', s.vol_ratio !== undefined ? s.vol_ratio.toFixed(1) + 'x' : '—',
+    s.vol_ratio > 1.5 ? 'hot' : s.vol_ratio > 1.2 ? 'warn' : s.vol_ratio < 0.7 ? 'bear' : '');
+
+  // VWAP dist
+  setInd('indVwapDist', s.vwap_dist !== undefined ? (s.vwap_dist >= 0 ? '+' : '') + s.vwap_dist.toFixed(1) : '—',
+    s.vwap_dist > 0 ? 'bull' : s.vwap_dist < 0 ? 'bear' : '');
+
+  // Bar range
+  setInd('indBarRange', s.bar_range?.toFixed(1) || '—', '');
+
+  // Body %
+  setInd('indBarBody', s.bar_body_pct !== undefined ? s.bar_body_pct + '%' : '—',
+    s.bar_body_pct > 70 ? 'hot' : '');
+
+  // Close position
+  setInd('indBarPos', s.bar_close_pos !== undefined ? s.bar_close_pos + '%' : '—',
+    s.bar_close_pos > 70 ? 'bull' : s.bar_close_pos < 30 ? 'bear' : '');
+}
+
+function setInd(id, value, cls) {
+  const el = $(id);
+  if (!el) return;
+  const valSpan = el.querySelector('.ind-val');
+  if (valSpan) {
+    valSpan.textContent = value;
+    valSpan.className = 'ind-val ' + (cls || '');
+  }
+}
+
+function fmtK(n) {
+  if (n === undefined || n === null) return '—';
+  if (Math.abs(n) >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+  if (Math.abs(n) >= 1000) return (n / 1000).toFixed(1) + 'K';
+  return Math.round(n).toString();
+}
+
+// ═══ ZONES ═══
+function updateZones(zones) {
+  const el = $('zonesContent');
+  if (!el) return;
+  if (!zones || (!zones.long && !zones.short)) {
+    el.innerHTML = '<div class="zones-empty">No active zones</div>';
+    return;
+  }
+
+  let html = '';
+  ['long', 'short'].forEach(dir => {
+    const z = zones[dir];
+    if (!z) return;
+    const arrow = dir === 'long' ? '▲' : '▼';
+    html += `
+      <div class="zone-block ${dir}">
+        <div class="zone-header">
+          <div class="zone-dir ${dir}">${arrow} ${dir.toUpperCase()} ZONE</div>
+          <div class="zone-count">${z.count} signals · avg ${z.avg_conf}%</div>
+        </div>
+        <div class="zone-levels">
+          <div class="zone-lvl">
+            <div class="zone-lvl-label">Entry</div>
+            <div class="zone-lvl-price entry">${z.entry?.toFixed(2)}</div>
+            <div class="zone-lvl-range">${z.entry_min?.toFixed(0)}–${z.entry_max?.toFixed(0)}</div>
+          </div>
+          <div class="zone-lvl">
+            <div class="zone-lvl-label">🎯 Target</div>
+            <div class="zone-lvl-price tp">${z.tp1?.toFixed(2)}</div>
+            <div class="zone-lvl-range">${z.tp1_min?.toFixed(0)}–${z.tp1_max?.toFixed(0)}</div>
+          </div>
+          <div class="zone-lvl">
+            <div class="zone-lvl-label">🚫 Stop</div>
+            <div class="zone-lvl-price sl">${z.sl?.toFixed(2)}</div>
+            <div class="zone-lvl-range">${z.sl_min?.toFixed(0)}–${z.sl_max?.toFixed(0)}</div>
+          </div>
+        </div>
+      </div>
+    `;
+  });
+  el.innerHTML = html;
+}
+
+// ═══ HELPERS ═══
+function $(id) { return document.getElementById(id); }
+function txt(id, v) { const e = $(id); if (e) e.textContent = v; }
+function mk(tag, cls, text) { const e = document.createElement(tag); e.className = cls; e.textContent = text; return e; }
+function confClass(pct) { return pct >= 70 ? 'high' : pct >= 45 ? 'medium' : 'low'; }
+
+connect();
+</script>
+</body>
+</html>
