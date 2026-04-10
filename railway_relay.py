@@ -92,6 +92,8 @@ async def push_handler(request):
         latest_data["zones"] = data["zones"]
     if "history" in data:
         latest_data["history"] = data["history"]
+    if "bars" in data:
+        latest_data["bars"] = data["bars"]
     latest_data["type"] = data.get("type", "full_update")
 
     # Broadcast to all connected browsers
