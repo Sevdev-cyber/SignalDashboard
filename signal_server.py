@@ -429,24 +429,29 @@ class SignalDashboardServer:
         signals_payload.sort(key=lambda x: x["confidence_pct"], reverse=True)
         self._latest_signals = signals_payload
 
-        # Send tick updates to BOTH local WS and relay (so Railway dashboard updates live)
-        tick_payload = {
+        # Local WS: full tick payload (signals, zones, etc.)
+        local_payload = {
             "type": "tick_update",
             "state": state,
-            "signals": signals_payload[:15],  # limit for relay bandwidth
+            "signals": signals_payload[:15],
             "resolved": self.resolved_signals[-10:],
             "zones": self._latest_zones,
         }
         if self.loop:
-            msg = self._safe_json(tick_payload)
+            msg = self._safe_json(local_payload)
             asyncio.run_coroutine_threadsafe(self._ws_only(msg), self.loop)
-            # Also push to relay every 2s (lightweight: no bars, no history)
+
+            # Relay: ultra-lightweight (~1-2KB) — just price + indicators
             now = time.time()
             if not hasattr(self, '_last_relay_tick'):
                 self._last_relay_tick = 0
             if now - self._last_relay_tick >= 2:
                 self._last_relay_tick = now
-                asyncio.run_coroutine_threadsafe(self._relay_push(tick_payload), self.loop)
+                relay_tick = {
+                    "type": "tick_update",
+                    "state": state,
+                }
+                asyncio.run_coroutine_threadsafe(self._relay_push(relay_tick), self.loop)
 
     async def _relay_push(self, payload: dict):
         """Push lightweight payload to relay (async, non-blocking)."""
