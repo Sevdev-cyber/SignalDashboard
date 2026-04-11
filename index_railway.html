@@ -560,26 +560,21 @@ function renderPredictions() {
       // Dashed line from entry → TP
       const line = svgEl('line', {
         x1: eX, y1: eY, x2: tpX, y2: tpY,
-        stroke: '#06b6d4', 'stroke-width': 1,
-        'stroke-dasharray': '4,3', opacity: 0.4
+        stroke: '#06b6d4', 'stroke-width': 0.8,
+        'stroke-dasharray': '3,4', opacity: 0.3
       });
       predOverlay.appendChild(line);
 
-      // Glow behind dot
-      predOverlay.appendChild(svgEl('circle', {
-        cx: tpX, cy: tpY, r: 8,
-        fill: '#06b6d4', opacity: 0.15
-      }));
       // TP dot
       predOverlay.appendChild(svgEl('circle', {
-        cx: tpX, cy: tpY, r: 5,
-        fill: '#06b6d4', opacity: 0.85
+        cx: tpX, cy: tpY, r: 4,
+        fill: '#06b6d4', opacity: 0.6
       }));
-      // Price label
+      // Price label (small, subtle)
       const label = svgEl('text', {
-        x: tpX + 9, y: tpY + 3,
-        fill: '#06b6d4', 'font-size': 9,
-        'font-family': 'JetBrains Mono, monospace', opacity: 0.9
+        x: tpX + 6, y: tpY + 3,
+        fill: '#06b6d4', 'font-size': 7,
+        'font-family': 'JetBrains Mono, monospace', opacity: 0.35
       });
       label.textContent = tpPrice.toFixed(0);
       predOverlay.appendChild(label);
@@ -594,30 +589,30 @@ function renderPredictions() {
       // Dashed line from entry → SL
       predOverlay.appendChild(svgEl('line', {
         x1: eX, y1: eY, x2: slX, y2: slY,
-        stroke: '#ef4444', 'stroke-width': 1,
-        'stroke-dasharray': '4,3', opacity: 0.35
+        stroke: '#ef4444', 'stroke-width': 0.8,
+        'stroke-dasharray': '3,4', opacity: 0.25
       }));
       // SL dot
       predOverlay.appendChild(svgEl('circle', {
-        cx: slX, cy: slY, r: 4,
-        fill: '#ef4444', opacity: 0.7
+        cx: slX, cy: slY, r: 3,
+        fill: '#ef4444', opacity: 0.5
       }));
-      // Price label
+      // Price label (small, subtle)
       const slLabel = svgEl('text', {
-        x: slX + 8, y: slY + 3,
-        fill: '#ef4444', 'font-size': 9,
-        'font-family': 'JetBrains Mono, monospace', opacity: 0.8
+        x: slX + 5, y: slY + 3,
+        fill: '#ef4444', 'font-size': 7,
+        'font-family': 'JetBrains Mono, monospace', opacity: 0.3
       });
       slLabel.textContent = slPrice.toFixed(0);
       predOverlay.appendChild(slLabel);
     }
 
-    // ── Small name label near entry ──
+    // ── Tiny name label near entry (very subtle) ──
     const nameLabel = svgEl('text', {
-      x: eX + 4, y: eY - 6,
+      x: eX + 3, y: eY - 4,
       fill: sig.direction === 'long' ? '#10b981' : '#ef4444',
-      'font-size': 8, 'font-family': 'Inter, sans-serif',
-      'font-weight': 600, opacity: 0.6
+      'font-size': 6, 'font-family': 'Inter, sans-serif',
+      'font-weight': 500, opacity: 0.3
     });
     nameLabel.textContent = sig.name;
     predOverlay.appendChild(nameLabel);
