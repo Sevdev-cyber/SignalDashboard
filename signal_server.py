@@ -117,16 +117,12 @@ class SignalDashboardServer:
         # ALWAYS push to relay HTTP server (regardless of local WS clients)
         if self.relay_url:
             try:
-                asyncio.get_event_loop().run_in_executor(
-                    self.executor, self._push_to_relay, msg
-                )
+                loop = self.loop or asyncio.get_event_loop()
+                loop.run_in_executor(self.executor, self._push_to_relay, msg)
             except Exception as e:
                 log.error("Relay dispatch error: %s", e)
 
         # Then broadcast to local WS clients (if any)
-        if not self._ws_clients:
-            return
-
         dead = set()
         for ws in list(self._ws_clients):
             try:
@@ -317,9 +313,10 @@ class SignalDashboardServer:
         if not self.bars_df.empty:
             recent = self.bars_df.tail(100)
             for _, row in recent.iterrows():
-                dt = row.get("datetime")
-                if pd.isna(dt): continue
-                # Lightweight Charts requires unix timestamp in seconds
+                # Support both 'datetime' (live) and 'timestamp' (demo) column names
+                dt = row.get("datetime") or row.get("timestamp")
+                if dt is None or (hasattr(dt, '__class__') and str(dt) == 'NaT'):
+                    continue
                 try:
                     ts = int(dt.timestamp())
                 except AttributeError:
