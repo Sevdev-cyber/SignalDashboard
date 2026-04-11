@@ -546,6 +546,10 @@ function renderPredictions() {
   const movePerBar = Math.max(currentAtr * 0.35, 2);
   let rendered = 0, skipped = 0;
 
+  // Start all predictions from current bar (right edge of chart)
+  const nowX = chart.timeScale().timeToCoordinate(lastBarTime);
+  if (nowX == null) { console.log('[PRED] nowX is null'); return; }
+
   currentPredictions.forEach(sig => {
     const tpPrice = sig.tp1;
     const slPrice = sig.invalidation || sig.sl;
@@ -555,36 +559,31 @@ function renderPredictions() {
     const tpDist = Math.abs(tpPrice - entryPrice);
     const slDist = Math.abs(slPrice - entryPrice);
 
-    const tpBars = Math.max(3, Math.ceil(tpDist / movePerBar));
-    const slBars = Math.max(2, Math.ceil(slDist / movePerBar));
+    const tpBars = Math.max(2, Math.ceil(tpDist / movePerBar));
+    const slBars = Math.max(1, Math.ceil(slDist / movePerBar));
 
-    const originTime = sig.origin_time || lastBarTime;
-
-    // Entry coordinates (origin point)
-    const eX = chart.timeScale().timeToCoordinate(originTime);
+    // Entry Y at current bar
     const eY = candleSeries.priceToCoordinate(entryPrice);
-    if (eX == null || eY == null) { skipped++; return; }
+    if (eY == null) { skipped++; return; }
 
     // ── TP prediction (blue/cyan) ──
-    const tpTime = originTime + tpBars * barSecs;
+    const tpTime = lastBarTime + tpBars * barSecs;
     const tpX = chart.timeScale().timeToCoordinate(tpTime);
     const tpY = candleSeries.priceToCoordinate(tpPrice);
 
     if (tpX != null && tpY != null) {
       // Dashed line from entry → TP
-      const line = svgEl('line', {
-        x1: eX, y1: eY, x2: tpX, y2: tpY,
+      predOverlay.appendChild(svgEl('line', {
+        x1: nowX, y1: eY, x2: tpX, y2: tpY,
         stroke: '#06b6d4', 'stroke-width': 0.8,
         'stroke-dasharray': '3,4', opacity: 0.3
-      });
-      predOverlay.appendChild(line);
-
+      }));
       // TP dot
       predOverlay.appendChild(svgEl('circle', {
         cx: tpX, cy: tpY, r: 4,
         fill: '#06b6d4', opacity: 0.6
       }));
-      // Price label (small, subtle)
+      // Price label
       const label = svgEl('text', {
         x: tpX + 6, y: tpY + 3,
         fill: '#06b6d4', 'font-size': 7,
@@ -595,14 +594,14 @@ function renderPredictions() {
     }
 
     // ── SL prediction (red) ──
-    const slTime = originTime + slBars * barSecs;
+    const slTime = lastBarTime + slBars * barSecs;
     const slX = chart.timeScale().timeToCoordinate(slTime);
     const slY = candleSeries.priceToCoordinate(slPrice);
 
     if (slX != null && slY != null) {
       // Dashed line from entry → SL
       predOverlay.appendChild(svgEl('line', {
-        x1: eX, y1: eY, x2: slX, y2: slY,
+        x1: nowX, y1: eY, x2: slX, y2: slY,
         stroke: '#ef4444', 'stroke-width': 0.8,
         'stroke-dasharray': '3,4', opacity: 0.25
       }));
@@ -611,7 +610,7 @@ function renderPredictions() {
         cx: slX, cy: slY, r: 3,
         fill: '#ef4444', opacity: 0.5
       }));
-      // Price label (small, subtle)
+      // Price label
       const slLabel = svgEl('text', {
         x: slX + 5, y: slY + 3,
         fill: '#ef4444', 'font-size': 7,
@@ -621,15 +620,12 @@ function renderPredictions() {
       predOverlay.appendChild(slLabel);
     }
 
-    // ── Tiny name label near entry (very subtle) ──
-    const nameLabel = svgEl('text', {
-      x: eX + 3, y: eY - 4,
+    // ── Small entry dot at current bar ──
+    predOverlay.appendChild(svgEl('circle', {
+      cx: nowX, cy: eY, r: 2,
       fill: sig.direction === 'long' ? '#10b981' : '#ef4444',
-      'font-size': 6, 'font-family': 'Inter, sans-serif',
-      'font-weight': 500, opacity: 0.3
-    });
-    nameLabel.textContent = sig.name;
-    predOverlay.appendChild(nameLabel);
+      opacity: 0.4
+    }));
     rendered++;
   });
   console.log(`[PRED] rendered=${rendered} skipped=${skipped} total=${currentPredictions.length} atr=${currentAtr}`);
