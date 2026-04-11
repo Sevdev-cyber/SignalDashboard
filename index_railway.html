@@ -427,15 +427,15 @@ function initChart() {
     wickUpColor: '#10b981', wickDownColor: '#ef4444'
   });
 
-  cvdSeries = chart.addHistogramSeries({
-    color: 'rgba(56, 189, 248, 0.4)',
-    priceFormat: { type: 'volume' },
+  cvdSeries = chart.addLineSeries({
+    color: '#38bdf8',
+    lineWidth: 2,
     priceScaleId: 'cvd',
   });
 
   chart.priceScale('cvd').applyOptions({
-    scaleMargins: { top: 0.8, bottom: 0 },
-    borderVisible: false,
+    scaleMargins: { top: 0.75, bottom: 0 },
+    borderVisible: true,
   });
 
   new ResizeObserver(entries => {
@@ -464,8 +464,7 @@ function updateChartHistory(bars) {
       
       const cvdData = bars.filter(b => b.cum_delta !== undefined).map(b => ({
           time: b.time,
-          value: b.cum_delta,
-          color: b.cum_delta >= 0 ? 'rgba(16, 185, 129, 0.6)' : 'rgba(239, 68, 68, 0.6)'
+          value: b.cum_delta
       }));
       if (cvdData.length > 0 && cvdSeries) {
           cvdSeries.setData(cvdData);
@@ -490,8 +489,7 @@ function updateChartTick(s) {
     if (cvdSeries && s.cum_delta !== undefined) {
         cvdSeries.update({
             time: lastBarTime,
-            value: s.cum_delta,
-            color: s.cum_delta >= 0 ? 'rgba(16, 185, 129, 0.6)' : 'rgba(239, 68, 68, 0.6)'
+            value: s.cum_delta
         });
     }
   } catch(e) { console.error("Tick update error:", e); }
