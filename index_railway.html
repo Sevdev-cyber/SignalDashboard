@@ -546,86 +546,85 @@ function renderPredictions() {
   const movePerBar = Math.max(currentAtr * 0.35, 2);
   let rendered = 0, skipped = 0;
 
-  // Start all predictions from current bar (right edge of chart)
+  // Current price Y as anchor
+  const priceY = candleSeries.priceToCoordinate(lastPrice);
   const nowX = chart.timeScale().timeToCoordinate(lastBarTime);
-  if (nowX == null) { console.log('[PRED] nowX is null'); return; }
+  if (nowX == null || priceY == null) { console.log('[PRED] nowX/priceY null'); return; }
 
-  currentPredictions.forEach(sig => {
+  // Sort: highest confidence first, spread across future time slots
+  const sorted = [...currentPredictions].sort((a,b) => (b.confidence_pct||0) - (a.confidence_pct||0));
+  const totalSlots = sorted.length;
+
+  sorted.forEach((sig, idx) => {
     const tpPrice = sig.tp1;
     const slPrice = sig.invalidation || sig.sl;
     const entryPrice = sig.entry;
     if (!tpPrice || !slPrice || !entryPrice) return;
 
-    const tpDist = Math.abs(tpPrice - entryPrice);
-    const slDist = Math.abs(slPrice - entryPrice);
+    // Spread signals across future: slot 1-N bars ahead
+    const slot = idx + 2; // start 2 bars into future
+    const futureTime = lastBarTime + slot * barSecs;
+    const futureX = chart.timeScale().timeToCoordinate(futureTime);
+    if (futureX == null) { skipped++; return; }
 
-    const tpBars = Math.max(2, Math.ceil(tpDist / movePerBar));
-    const slBars = Math.max(1, Math.ceil(slDist / movePerBar));
-
-    // Entry Y at current bar
+    const tpY = candleSeries.priceToCoordinate(tpPrice);
+    const slY = candleSeries.priceToCoordinate(slPrice);
     const eY = candleSeries.priceToCoordinate(entryPrice);
     if (eY == null) { skipped++; return; }
 
-    // ── TP prediction (blue/cyan) ──
-    const tpTime = lastBarTime + tpBars * barSecs;
-    const tpX = chart.timeScale().timeToCoordinate(tpTime);
-    const tpY = candleSeries.priceToCoordinate(tpPrice);
+    const isLong = sig.direction === 'long';
+    const sigColor = isLong ? '#10b981' : '#ef4444';
 
-    if (tpX != null && tpY != null) {
-      // Dashed line from entry → TP
-      predOverlay.appendChild(svgEl('line', {
-        x1: nowX, y1: eY, x2: tpX, y2: tpY,
-        stroke: '#06b6d4', 'stroke-width': 0.8,
-        'stroke-dasharray': '3,4', opacity: 0.3
-      }));
-      // TP dot
-      predOverlay.appendChild(svgEl('circle', {
-        cx: tpX, cy: tpY, r: 4,
-        fill: '#06b6d4', opacity: 0.6
-      }));
-      // Price label
-      const label = svgEl('text', {
-        x: tpX + 6, y: tpY + 3,
-        fill: '#06b6d4', 'font-size': 7,
-        'font-family': 'JetBrains Mono, monospace', opacity: 0.35
-      });
-      label.textContent = tpPrice.toFixed(0);
-      predOverlay.appendChild(label);
-    }
-
-    // ── SL prediction (red) ──
-    const slTime = lastBarTime + slBars * barSecs;
-    const slX = chart.timeScale().timeToCoordinate(slTime);
-    const slY = candleSeries.priceToCoordinate(slPrice);
-
-    if (slX != null && slY != null) {
-      // Dashed line from entry → SL
-      predOverlay.appendChild(svgEl('line', {
-        x1: nowX, y1: eY, x2: slX, y2: slY,
-        stroke: '#ef4444', 'stroke-width': 0.8,
-        'stroke-dasharray': '3,4', opacity: 0.25
-      }));
-      // SL dot
-      predOverlay.appendChild(svgEl('circle', {
-        cx: slX, cy: slY, r: 3,
-        fill: '#ef4444', opacity: 0.5
-      }));
-      // Price label
-      const slLabel = svgEl('text', {
-        x: slX + 5, y: slY + 3,
-        fill: '#ef4444', 'font-size': 7,
-        'font-family': 'JetBrains Mono, monospace', opacity: 0.3
-      });
-      slLabel.textContent = slPrice.toFixed(0);
-      predOverlay.appendChild(slLabel);
-    }
-
-    // ── Small entry dot at current bar ──
-    predOverlay.appendChild(svgEl('circle', {
-      cx: nowX, cy: eY, r: 2,
-      fill: sig.direction === 'long' ? '#10b981' : '#ef4444',
-      opacity: 0.4
+    // ── Dashed line: current price → entry at future slot ──
+    predOverlay.appendChild(svgEl('line', {
+      x1: nowX, y1: priceY, x2: futureX, y2: eY,
+      stroke: sigColor, 'stroke-width': 0.6,
+      'stroke-dasharray': '2,3', opacity: 0.2
     }));
+
+    // ── Entry diamond at future slot ──
+    predOverlay.appendChild(svgEl('circle', {
+      cx: futureX, cy: eY, r: 2.5,
+      fill: sigColor, opacity: 0.5
+    }));
+
+    // ── TP dot (above/below entry) ──
+    if (tpY != null) {
+      predOverlay.appendChild(svgEl('line', {
+        x1: futureX, y1: eY, x2: futureX, y2: tpY,
+        stroke: '#06b6d4', 'stroke-width': 1,
+        'stroke-dasharray': '2,2', opacity: 0.3
+      }));
+      predOverlay.appendChild(svgEl('circle', {
+        cx: futureX, cy: tpY, r: 3.5,
+        fill: '#06b6d4', opacity: 0.65
+      }));
+    }
+
+    // ── SL dot (opposite side) ──
+    if (slY != null) {
+      predOverlay.appendChild(svgEl('line', {
+        x1: futureX, y1: eY, x2: futureX, y2: slY,
+        stroke: '#ef4444', 'stroke-width': 0.8,
+        'stroke-dasharray': '2,2', opacity: 0.2
+      }));
+      predOverlay.appendChild(svgEl('circle', {
+        cx: futureX, cy: slY, r: 2.5,
+        fill: '#ef4444', opacity: 0.45
+      }));
+    }
+
+    // ── Tiny name (only for top 5) ──
+    if (idx < 5) {
+      const nameLabel = svgEl('text', {
+        x: futureX + 5, y: eY - 3,
+        fill: sigColor, 'font-size': 6,
+        'font-family': 'Inter, sans-serif',
+        'font-weight': 500, opacity: 0.3
+      });
+      nameLabel.textContent = sig.name;
+      predOverlay.appendChild(nameLabel);
+    }
     rendered++;
   });
   console.log(`[PRED] rendered=${rendered} skipped=${skipped} total=${currentPredictions.length} atr=${currentAtr}`);
