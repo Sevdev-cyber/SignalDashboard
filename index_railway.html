@@ -741,9 +741,8 @@ function updateSignals(signals, resolved) {
       }
     };
 
-    top.forEach(processActive);
-    // Rest → prediction dots on chart (no price lines)
-    updatePredictions(rest, lastAtr);
+    // ALL signals → prediction dots on chart (no price lines)
+    updatePredictions(signals, lastAtr);
 
     // ── RESOLVED signals: marker only (no price lines), at origin candle ──
     resolved.forEach(sig => {
@@ -766,33 +765,44 @@ function updateSignals(signals, resolved) {
     } catch(e) { console.error("Marker error", e); }
   }
 
-  // TOP cards
+  // All signals shown as prediction dots — compact summary instead of cards
   const topEl = $('topSignals');
-  if (top.length === 0) {
-    topEl.innerHTML = `<div class="empty-state"><div class="icon">🔇</div><div class="title">No active signals</div><div class="desc">Waiting for next bar close…</div></div>`;
+  if (signals.length === 0) {
+    topEl.innerHTML = `<div class="empty-state"><div class="icon">📡</div><div class="title">No active signals</div><div class="desc">Waiting for next bar close…</div></div>`;
   } else {
-    topEl.innerHTML = '';
-    top.forEach((sig, i) => topEl.appendChild(createHeroCard(sig, i + 1)));
+    const longs = signals.filter(s => s.direction === 'long');
+    const shorts = signals.filter(s => s.direction === 'short');
+    const bestSig = signals[0];
+    const bestConf = bestSig ? bestSig.confidence_pct : 0;
+    topEl.innerHTML = `
+      <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center">
+        <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:14px 20px;flex:1;min-width:200px">
+          <div style="font-size:.7rem;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted);margin-bottom:6px">📍 Predictions on Chart</div>
+          <div style="display:flex;gap:16px;align-items:center;font-family:'JetBrains Mono',monospace">
+            <span style="font-size:1.8rem;font-weight:900;color:var(--text-primary)">${signals.length}</span>
+            <div style="font-size:.8rem;line-height:1.6">
+              <div><span style="color:var(--long);font-weight:700">▲ ${longs.length}</span> long</div>
+              <div><span style="color:var(--short);font-weight:700">▼ ${shorts.length}</span> short</div>
+            </div>
+            <div style="margin-left:auto;text-align:right;font-size:.75rem;color:var(--text-muted)">
+              <div><span style="color:#06b6d4">●</span> TP target</div>
+              <div><span style="color:#ef4444">●</span> SL level</div>
+            </div>
+          </div>
+        </div>
+        ${bestSig ? `<div style="background:var(--bg-card);border:1px solid var(--border);border-left:3px solid ${bestSig.direction === 'long' ? 'var(--long)' : 'var(--short)'};border-radius:var(--radius);padding:14px 20px;min-width:220px">
+          <div style="font-size:.7rem;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted);margin-bottom:4px">🔥 Best Signal</div>
+          <div style="font-size:1rem;font-weight:800">${bestSig.name} <span style="color:${bestSig.direction === 'long' ? 'var(--long)' : 'var(--short)'};font-size:.8rem">${bestSig.direction.toUpperCase()}</span></div>
+          <div style="font-family:'JetBrains Mono',monospace;font-size:.78rem;margin-top:4px;color:var(--text-secondary)">
+            Entry ${bestSig.entry?.toFixed(2)} → <span style="color:var(--long)">TP ${bestSig.tp1?.toFixed(2)}</span> · <span style="color:var(--short)">SL ${bestSig.invalidation?.toFixed(2)}</span>
+          </div>
+          <div style="font-family:'JetBrains Mono',monospace;font-size:1.4rem;font-weight:900;color:${confClass(bestConf) === 'high' ? 'var(--long)' : confClass(bestConf) === 'medium' ? 'var(--gold)' : 'var(--short)'};margin-top:2px">${bestConf}%</div>
+        </div>` : ''}
+      </div>`;
   }
 
-  // REST toggle — show prediction count (dots are on chart)
-  const toggle = $('restToggle');
-  if (rest.length > 0) {
-    toggle.style.display = 'flex';
-    const rl = rest.filter(s => s.direction === 'long').length;
-    const rs = rest.filter(s => s.direction === 'short').length;
-    txt('restCount', `${rest.length} on chart`);
-    const miniGrid = $('miniGrid');
-    miniGrid.innerHTML = `<div style="padding:12px;color:var(--text-muted);font-size:.8rem;text-align:center">
-      📍 ${rest.length} predictions shown as dots on chart
-      <span style="color:var(--long)">▲${rl} long</span> ·
-      <span style="color:var(--short)">▼${rs} short</span><br>
-      <span style="color:#06b6d4">● TP targets</span> ·
-      <span style="color:#ef4444">● SL levels</span>
-    </div>`;
-  } else {
-    toggle.style.display = 'none';
-  }
+  // Hide rest toggle (all signals are dots now)
+  $('restToggle').style.display = 'none';
 
   // Verdict
   buildVerdict(top, signals);

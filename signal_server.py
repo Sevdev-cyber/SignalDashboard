@@ -333,8 +333,16 @@ class SignalDashboardServer:
                     break
 
             if not matched:
-                # Pre-filter: skip signals that are already dead (TP/SL already hit)
                 price = self.current_price
+                atr = float(self.bars_df.iloc[-1].get("atr", 20)) if not self.bars_df.empty else 20
+
+                # Pre-filter 1: skip signals where entry is too far from current price (>1.5 ATR)
+                entry_dist = abs(s["entry"] - price)
+                if entry_dist > atr * 1.5:
+                    skipped_dead += 1
+                    continue
+
+                # Pre-filter 2: skip signals where TP/SL already hit
                 buffer = 1.0
                 dead = False
                 if s["direction"] == "long":
@@ -432,14 +440,26 @@ class SignalDashboardServer:
         signals_payload.sort(key=lambda x: x["confidence_pct"], reverse=True)
         self._latest_signals = signals_payload
 
+        # Tick updates go to local WS only (no relay — relay gets data on bar close)
         if self.loop:
-            asyncio.run_coroutine_threadsafe(self._broadcast({
+            msg = self._safe_json({
                 "type": "tick_update",
                 "state": state,
                 "signals": signals_payload,
                 "resolved": self.resolved_signals,
                 "zones": self._latest_zones,
-            }), self.loop)
+            })
+            asyncio.run_coroutine_threadsafe(self._ws_only(msg), self.loop)
+
+    async def _ws_only(self, msg: str):
+        """Send to local WebSocket clients only (no relay)."""
+        dead = set()
+        for ws in list(self._ws_clients):
+            try:
+                await ws.send(msg)
+            except Exception:
+                dead.add(ws)
+        self._ws_clients -= dead
 
     # ── Demo Mode ──
 
@@ -579,7 +599,17 @@ def main():
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
 
-    logging.basicConfig(level=getattr(logging, args.log_level), format=LOG_FMT)
+    # Log to both console and file
+    log_level = getattr(logging, args.log_level)
+    root = logging.getLogger()
+    root.setLevel(log_level)
+    root.handlers.clear()
+    console_h = logging.StreamHandler()
+    console_h.setFormatter(logging.Formatter(LOG_FMT))
+    root.addHandler(console_h)
+    file_h = logging.FileHandler(str(Path(__file__).parent / "server.log"), mode="w", encoding="utf-8")
+    file_h.setFormatter(logging.Formatter(LOG_FMT))
+    root.addHandler(file_h)
 
     server = SignalDashboardServer(
         tcp_host=args.host, tcp_port=args.port,
