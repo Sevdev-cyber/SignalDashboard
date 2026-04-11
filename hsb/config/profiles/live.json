@@ -1,0 +1,10 @@
+{
+  "_extends": "paper.json",
+  "name": "live",
+  "output_root": "runtime/live",
+  "tcp": {
+    "account_name": "${NT_TCP_ACCOUNT_NAME}",
+    "dry_run": false
+  },
+  "notes": "LIVE trading — requires .env.live with NT_TCP_ACCOUNT_NAME set to real account."
+}

@@ -1,0 +1,10 @@
+{
+  "_extends": "base.json",
+  "name": "paper",
+  "output_root": "runtime/paper",
+  "tcp": {
+    "account_name": "Sim101",
+    "dry_run": false
+  },
+  "notes": "Paper trading on Sim101 via TickStreamerMirror port 5556."
+}

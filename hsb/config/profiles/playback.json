@@ -1,0 +1,11 @@
+{
+  "_extends": "base.json",
+  "name": "playback",
+  "output_root": "runtime/playback",
+  "stale_feed_seconds": 315360000,
+  "tcp": {
+    "account_name": "Playback101",
+    "dry_run": false
+  },
+  "notes": "Playback101 testing — stale_feed set to ~10 years because playback has no real-time feed."
+}

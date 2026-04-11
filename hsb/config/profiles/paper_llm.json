@@ -1,0 +1,7 @@
+{
+  "_extends": "paper.json",
+  "name": "paper_llm",
+  "api_mode": "full",
+  "output_root": "runtime/paper_llm",
+  "notes": "Paper trading with full LLM per-candidate review. Requires DEEPSEEK_API_KEY in .env."
+}

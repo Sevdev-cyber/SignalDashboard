@@ -1,0 +1,18 @@
+{
+  "name": "base",
+  "variant": "same_tf_v5",
+  "session": "bars",
+  "micro_source": "same_tf",
+  "gate_mode": "off",
+  "api_mode": "fallback",
+  "loop_poll_seconds": 5,
+  "order_limit_per_cycle": 1,
+  "require_flat_position": true,
+  "stale_feed_seconds": 420,
+  "tcp": {
+    "host": "127.0.0.1",
+    "port": 5556,
+    "account_name": "Sim101",
+    "dry_run": true
+  }
+}
