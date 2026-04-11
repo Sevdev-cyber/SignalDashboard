@@ -378,6 +378,7 @@ let lastBarTime = null;
 let lastBarOpen = 0;
 let lastBarHigh = 0;
 let lastBarLow = 0;
+let chartBarTimes = new Set();
 
 function connect() {
   ws = new WebSocket(WS_URL);
@@ -462,6 +463,9 @@ function updateChartHistory(bars) {
       lastBarOpen = lastBar.open;
       lastBarHigh = lastBar.high;
       lastBarLow = lastBar.low;
+      // Track all bar times for marker snapping
+      chartBarTimes.clear();
+      unique.forEach(b => chartBarTimes.add(b.time));
   }
   
   try { 
@@ -595,13 +599,24 @@ function updateSignals(signals) {
       if(sig.tp1) priceLines.push(candleSeries.createPriceLine({ price: sig.tp1, color: '#06b6d4', lineWidth: 1, lineStyle: 1, axisLabelVisible: true, title: baseName + ' TP' }));
       if(sig.invalidation) priceLines.push(candleSeries.createPriceLine({ price: sig.invalidation, color: '#f59e0b', lineWidth: 1, lineStyle: 1, axisLabelVisible: true, title: baseName + ' SL' }));
 
-      if (sig.origin_time) {
+      // Marker: use origin_time, fallback to lastBarTime
+      let markerTime = sig.origin_time || lastBarTime;
+      if (markerTime && chartBarTimes.size > 0) {
+          // Snap to nearest known bar time so Lightweight Charts accepts it
+          if (!chartBarTimes.has(markerTime)) {
+              let best = null, bestDiff = Infinity;
+              for (const bt of chartBarTimes) {
+                  const diff = Math.abs(bt - markerTime);
+                  if (diff < bestDiff) { bestDiff = diff; best = bt; }
+              }
+              if (best !== null) markerTime = best;
+          }
           markers.push({
-              time: sig.origin_time,
+              time: markerTime,
               position: sig.direction === 'long' ? 'belowBar' : 'aboveBar',
               color: cLabel,
               shape: sig.direction === 'long' ? 'arrowUp' : 'arrowDown',
-              text: sig.direction.toUpperCase() + ' ENTRY',
+              text: sig.direction.toUpperCase() + ' ▶ ' + sig.name,
               size: 2
           });
       }
@@ -612,7 +627,12 @@ function updateSignals(signals) {
     
     markers.sort((a,b) => a.time - b.time);
     try {
-        candleSeries.setMarkers(markers);
+        if (markers.length > 0) {
+            candleSeries.setMarkers(markers);
+            console.log('Markers set:', markers.length);
+        } else {
+            candleSeries.setMarkers([]);
+        }
     } catch(e) { console.error("Marker error", e); }
   }
 

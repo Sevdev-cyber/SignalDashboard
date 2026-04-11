@@ -230,29 +230,16 @@ class SignalEngine:
         # POST-PROCESSING: Wzmacnianie i dławienie sygnałów według wyników testu 120-dniowego
         for sig in enriched:
             # 1. Rule of 4 (Kaganiec na brak konfluencji)
+            #    < 4 konfluencje = historycznie 1-19% WR → obcinamy o połowę
             if sig["confluence_count"] < 4:
-                # Bezlitosne ścięcie pewności punktowej o połowę
                 sig["confidence_pct"] = int(sig["confidence_pct"] * 0.5)
 
-            # 2. Blokada LONG i absolutne ubicie BOS_BULL
-            if sig["direction"] == "long":
-                if sig["regime"] != "trend_up":
-                    sig["confidence_pct"] = int(sig["confidence_pct"] * 0.4)
-                if "BOS" in sig["name"] and sig["confluence_count"] < 5:
-                    sig["confidence_pct"] = int(sig["confidence_pct"] * 0.1)
-
-            # 3. Dodatkowy rygor na FVG_FILL
-            if "FVG" in sig["name"] and not sig["delta_aligned"]:
-                sig["confidence_pct"] = int(sig["confidence_pct"] * 0.2)
-                
-            # 4. Boost dla The Holy Grail (PULLBACK short)
-            if "PULLBACK" in sig["name"] and sig["direction"] == "short":
+            # 2. Boost dla PULLBACK z odrzuceniem EMA (historycznie 98.9% WR)
+            if "PULLBACK" in sig["name"]:
                 reasons_str = "|".join(sig.get("reasons", [])).upper()
                 confirms_str = "|".join(sig["confirming_signals"]).upper()
                 if "EMA" in reasons_str or "EMA" in confirms_str:
-                    sig["confidence_pct"] = min(100, int(sig["confidence_pct"] * 1.5 + 20))
-                else:
-                    sig["confidence_pct"] = min(100, int(sig["confidence_pct"] * 1.25))
+                    sig["confidence_pct"] = min(100, int(sig["confidence_pct"] * 1.3 + 10))
 
         # Odrzucamy drastycznie osłabione sygnały by odśmiecić wizjonera
         enriched = [s for s in enriched if s["confidence_pct"] >= 50]

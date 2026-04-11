@@ -217,12 +217,21 @@ class SignalDashboardServer:
             to_remove = []
             for sid, s in list(self.active_signals.items()):
                 buffer = 1.0  # 1 point (4 MNQ ticks) margin
+                hit = None
                 if s["direction"] == "long":
-                    if self.current_price <= s["sl"] + buffer or self.current_price >= s["tp1"] - buffer:
-                        to_remove.append(sid)
+                    if self.current_price <= s["sl"] + buffer:
+                        hit = "SL"
+                    elif self.current_price >= s["tp1"] - buffer:
+                        hit = "TP"
                 else: # short
-                    if self.current_price >= s["sl"] - buffer or self.current_price <= s["tp1"] + buffer:
-                        to_remove.append(sid)
+                    if self.current_price >= s["sl"] - buffer:
+                        hit = "SL"
+                    elif self.current_price <= s["tp1"] + buffer:
+                        hit = "TP"
+                if hit:
+                    log.info("🗑️ Signal REMOVED [%s] %s %s @ %.2f → hit %s (price=%.2f)",
+                             s["name"], s["direction"], s["id"][:8], s["entry"], hit, self.current_price)
+                    to_remove.append(sid)
                         
             for r in to_remove:
                 del self.active_signals[r]
@@ -336,7 +345,7 @@ class SignalDashboardServer:
             }), self.loop)
 
     def _tick_update(self):
-        """Broadcast lightweight tick update every 15 seconds."""
+        """Broadcast lightweight tick update every 4 seconds."""
         if not self._latest_state:
             return
 
@@ -348,10 +357,16 @@ class SignalDashboardServer:
         )
         self._latest_state = state
 
+        # Always send current active signals (may have been pruned by TP/SL)
+        signals_payload = list(self.active_signals.values())
+        signals_payload.sort(key=lambda x: x["confidence_pct"], reverse=True)
+        self._latest_signals = signals_payload
+
         if self.loop:
             asyncio.run_coroutine_threadsafe(self._broadcast({
                 "type": "tick_update",
                 "state": state,
+                "signals": signals_payload,
                 "zones": self._latest_zones,
             }), self.loop)
 
