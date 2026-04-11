@@ -380,6 +380,7 @@ let lastBarHigh = 0;
 let lastBarLow = 0;
 let chartBarTimes = new Set();
 let lastAtr = 20;
+var predOverlay = null;
 
 function connect() {
   ws = new WebSocket(WS_URL);
@@ -451,6 +452,19 @@ function initChart() {
     chart.applyOptions({ width: newRect.width, height: newRect.height });
   }).observe(container);
 
+  // SVG overlay for prediction dots + dashed lines
+  container.style.position = 'relative';
+  predOverlay = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  predOverlay.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:5;overflow:visible';
+  container.appendChild(predOverlay);
+
+  // Re-render SVG on any chart interaction
+  chart.timeScale().subscribeVisibleLogicalRangeChange(() => renderPredSVG());
+  let _predThrottle = 0;
+  chart.subscribeCrosshairMove(() => {
+    const now = Date.now();
+    if (now - _predThrottle > 60) { _predThrottle = now; renderPredSVG(); }
+  });
 }
 
 function updateChartHistory(bars) {
@@ -507,76 +521,146 @@ function updateChartTick(s) {
   } catch(e) { console.error("Tick update error:", e); }
 }
 
-// ═══ PREDICTIONS (TP/SL as native price lines — always scale correctly) ═══
+// ═══ PREDICTIONS ═══
 var predLines = [];
+var predSignals = [];
+var predAtr = 20;
 
 function updatePredictions(signals, atr) {
-  console.log('[PRED] called, candleSeries:', !!candleSeries, 'signals:', signals?.length);
   if (!candleSeries) return;
 
-  // Remove old prediction lines
+  // Remove old price lines (top 3 only)
   predLines.forEach(l => { try { candleSeries.removePriceLine(l); } catch(e){} });
   predLines = [];
 
-  if (!signals || signals.length === 0) return;
+  predSignals = signals || [];
+  predAtr = atr || 20;
 
-  // Deduplicate by rounding TP/SL to nearest 0.5 to avoid overlapping lines
-  const tpSeen = new Set();
-  const slSeen = new Set();
+  if (predSignals.length === 0) { renderPredSVG(); return; }
 
   // Sort by confidence
-  const sorted = [...signals].sort((a,b) => (b.confidence_pct||0) - (a.confidence_pct||0));
+  predSignals.sort((a,b) => (b.confidence_pct||0) - (a.confidence_pct||0));
 
-  sorted.forEach((sig, idx) => {
+  // Top 2 get axis labels via price lines
+  predSignals.slice(0, 2).forEach((sig) => {
     const tp = sig.tp1;
     const sl = sig.invalidation || sig.sl;
     if (!tp || !sl) return;
-
     const isLong = sig.direction === 'long';
     const conf = sig.confidence_pct || 50;
+
+    predLines.push(candleSeries.createPriceLine({
+      price: sig.entry,
+      color: isLong ? 'rgba(16, 185, 129, 0.7)' : 'rgba(239, 68, 68, 0.7)',
+      lineWidth: 2, lineStyle: 0,
+      axisLabelVisible: true,
+      title: `${isLong ? '▲' : '▼'} ${sig.name} ${conf}%`,
+    }));
+    predLines.push(candleSeries.createPriceLine({
+      price: tp, color: 'rgba(6, 182, 212, 0.5)',
+      lineWidth: 1, lineStyle: 2, axisLabelVisible: true,
+      title: `TP ${tp.toFixed(0)}`,
+    }));
+    predLines.push(candleSeries.createPriceLine({
+      price: sl, color: 'rgba(239, 68, 68, 0.45)',
+      lineWidth: 1, lineStyle: 2, axisLabelVisible: true,
+      title: `SL ${sl.toFixed(0)}`,
+    }));
+  });
+
+  // Render SVG overlay for ALL signals (dots + dashed lines)
+  renderPredSVG();
+}
+
+function renderPredSVG() {
+  if (!predOverlay || !chart || !candleSeries) return;
+  predOverlay.innerHTML = '';
+
+  const barSecs = 300;
+  const movePerBar = Math.max(predAtr * 0.35, 2);
+
+  predSignals.forEach((sig, idx) => {
+    const tp = sig.tp1;
+    const sl = sig.invalidation || sig.sl;
+    const entry = sig.entry;
+    if (!tp || !sl || !entry) return;
+
+    const isLong = sig.direction === 'long';
     const isTop = idx < 3;
+    const sigColor = isLong ? '#10b981' : '#ef4444';
 
-    // TP line (cyan) — deduplicate by rounded price
-    const tpKey = Math.round(tp * 2) / 2;
-    if (!tpSeen.has(tpKey)) {
-      tpSeen.add(tpKey);
-      predLines.push(candleSeries.createPriceLine({
-        price: tp,
-        color: isTop ? 'rgba(6, 182, 212, 0.7)' : 'rgba(6, 182, 212, 0.6)',
-        lineWidth: 1,
-        lineStyle: 2, // dashed
-        axisLabelVisible: true,
-        title: isTop ? `TP ${sig.name}` : `· ${tp.toFixed(0)}`,
+    // Origin = bar where signal was created
+    const originTime = sig.origin_time || lastBarTime;
+    const oX = chart.timeScale().timeToCoordinate(originTime);
+    const oY = candleSeries.priceToCoordinate(entry);
+    if (oX == null || oY == null) return;
+
+    // TP position — project into future from origin
+    const tpDist = Math.abs(tp - entry);
+    const tpBars = Math.max(3, Math.ceil(tpDist / movePerBar));
+    const tpTime = originTime + tpBars * barSecs;
+    const tpX = chart.timeScale().timeToCoordinate(tpTime);
+    const tpY = candleSeries.priceToCoordinate(tp);
+
+    // SL position — project into future from origin
+    const slDist = Math.abs(sl - entry);
+    const slBars = Math.max(2, Math.ceil(slDist / movePerBar));
+    const slTime = originTime + slBars * barSecs;
+    const slX = chart.timeScale().timeToCoordinate(slTime);
+    const slY = candleSeries.priceToCoordinate(sl);
+
+    // ── Origin dot (entry point on candle) ──
+    predOverlay.appendChild(svgEl('circle', {
+      cx: oX, cy: oY, r: isTop ? 4 : 3,
+      fill: sigColor, opacity: isTop ? 0.8 : 0.5
+    }));
+
+    // ── Dashed line origin → TP ──
+    if (tpX != null && tpY != null) {
+      predOverlay.appendChild(svgEl('line', {
+        x1: oX, y1: oY, x2: tpX, y2: tpY,
+        stroke: '#06b6d4', 'stroke-width': isTop ? 1 : 0.7,
+        'stroke-dasharray': '4,3', opacity: isTop ? 0.5 : 0.3
+      }));
+      // TP dot
+      predOverlay.appendChild(svgEl('circle', {
+        cx: tpX, cy: tpY, r: isTop ? 5 : 3.5,
+        fill: '#06b6d4', opacity: isTop ? 0.7 : 0.5
       }));
     }
 
-    // SL line (red) — deduplicate
-    const slKey = Math.round(sl * 2) / 2;
-    if (!slSeen.has(slKey)) {
-      slSeen.add(slKey);
-      predLines.push(candleSeries.createPriceLine({
-        price: sl,
-        color: isTop ? 'rgba(239, 68, 68, 0.6)' : 'rgba(239, 68, 68, 0.6)',
-        lineWidth: 1,
-        lineStyle: 2,
-        axisLabelVisible: true,
-        title: isTop ? `SL ${sig.name}` : `· ${sl.toFixed(0)}`,
+    // ── Dashed line origin → SL ──
+    if (slX != null && slY != null) {
+      predOverlay.appendChild(svgEl('line', {
+        x1: oX, y1: oY, x2: slX, y2: slY,
+        stroke: '#ef4444', 'stroke-width': isTop ? 1 : 0.7,
+        'stroke-dasharray': '4,3', opacity: isTop ? 0.4 : 0.25
+      }));
+      // SL dot
+      predOverlay.appendChild(svgEl('circle', {
+        cx: slX, cy: slY, r: isTop ? 4 : 2.5,
+        fill: '#ef4444', opacity: isTop ? 0.6 : 0.4
       }));
     }
 
-    // Entry line (green/red, only top 3)
-    if (isTop) {
-      predLines.push(candleSeries.createPriceLine({
-        price: sig.entry,
-        color: isLong ? 'rgba(16, 185, 129, 0.7)' : 'rgba(239, 68, 68, 0.7)',
-        lineWidth: 2,
-        lineStyle: 0, // solid
-        axisLabelVisible: true,
-        title: `${isLong ? '▲' : '▼'} ${sig.name} ${conf}%`,
-      }));
+    // ── Name label at origin (small for non-top) ──
+    if (!isTop) {
+      const label = svgEl('text', {
+        x: oX + 5, y: oY - 4,
+        fill: sigColor, 'font-size': 7,
+        'font-family': 'JetBrains Mono, monospace',
+        'font-weight': 500, opacity: 0.5
+      });
+      label.textContent = sig.name;
+      predOverlay.appendChild(label);
     }
   });
-  console.log(`[PRED] ${predLines.length} price lines from ${signals.length} signals`);
+}
+
+function svgEl(tag, attrs) {
+  const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+  return el;
 }
 
 // ═══ STATE ═══
