@@ -310,10 +310,10 @@ class SignalDashboardServer:
         self._latest_signals = signals_payload
         self._latest_zones = zones
 
-        # Extract recent candlestick history for TradingView chart (last 100 bars)
+        # Extract recent candlestick history for TradingView chart (last 800 bars for FVG context)
         bars_for_chart = []
         if not self.bars_df.empty:
-            recent = self.bars_df.tail(100)
+            recent = self.bars_df.tail(800)
             for _, row in recent.iterrows():
                 # Support both 'datetime' (live) and 'timestamp' (demo) column names
                 dt = row.get("datetime") or row.get("timestamp")
@@ -387,10 +387,10 @@ class SignalDashboardServer:
         price = CENTER_PRICE
         bars = []
 
-        # Prefill 80 historical bars (5-min bars going back ~7 hours)
+        # Prefill 800 historical bars (5-min bars going back ~2.7 days)
         BAR_SECS = 300  # 5 minutes per bar
         now_ts = int(pd.Timestamp.now(tz="UTC").timestamp())
-        for i in range(80, 0, -1):
+        for i in range(800, 0, -1):
             atr = random.uniform(15, 35)
             # Mean-revert price to center
             price += (CENTER_PRICE - price) * 0.05 + random.uniform(-8, 8)
@@ -446,8 +446,8 @@ class SignalDashboardServer:
                 "low": bar_low,   "close": bar_close,
                 "volume": volume, "delta": delta,
             })
-            if len(bars) > 200:
-                bars = bars[-200:]
+            if len(bars) > 1000:
+                bars = bars[-1000:]
 
             self.bars_df = pd.DataFrame(bars)
             try:
