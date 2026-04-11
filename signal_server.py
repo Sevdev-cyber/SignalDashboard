@@ -420,7 +420,14 @@ class SignalDashboardServer:
         self.current_price = price
         self._evaluate_and_broadcast()
 
+        # Maintain a simulated clock that advances by 5 minutes every loop
+        sim_time = now_ts
+
         while True:
+            # Advance simulated time
+            sim_time += BAR_SECS
+            bar_dt = pd.Timestamp(sim_time, unit="s", tz="UTC")
+
             # Mean-revert price to center, small random walk
             price += (CENTER_PRICE - price) * 0.05 + random.uniform(-8, 8)
             price = max(CENTER_PRICE - 200, min(CENTER_PRICE + 200, price))
@@ -431,7 +438,6 @@ class SignalDashboardServer:
             bar_close = random.uniform(bar_low + 0.5, bar_high - 0.5)
             volume = random.randint(800, 4000)
             delta = random.uniform(-volume * 0.35, volume * 0.35)
-            bar_dt = pd.Timestamp.now(tz="UTC")
 
             bars.append({
                 "timestamp": bar_dt,

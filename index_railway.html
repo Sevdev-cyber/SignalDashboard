@@ -816,22 +816,22 @@ function updateIndicators(s) {
   setInd('indVolume', fmtK(s.volume) || '—', '');
 
   // Vol ratio
-  setInd('indVolRatio', s.vol_ratio !== undefined ? s.vol_ratio.toFixed(1) + 'x' : '—',
+  setInd('indVolRatio', s.vol_ratio != null ? s.vol_ratio.toFixed(1) + 'x' : '—',
     s.vol_ratio > 1.5 ? 'hot' : s.vol_ratio > 1.2 ? 'warn' : s.vol_ratio < 0.7 ? 'bear' : '');
 
   // VWAP dist
-  setInd('indVwapDist', s.vwap_dist !== undefined ? (s.vwap_dist >= 0 ? '+' : '') + s.vwap_dist.toFixed(1) : '—',
+  setInd('indVwapDist', s.vwap_dist != null ? (s.vwap_dist >= 0 ? '+' : '') + s.vwap_dist.toFixed(1) : '—',
     s.vwap_dist > 0 ? 'bull' : s.vwap_dist < 0 ? 'bear' : '');
 
   // Bar range
   setInd('indBarRange', s.bar_range?.toFixed(1) || '—', '');
 
   // Body %
-  setInd('indBarBody', s.bar_body_pct !== undefined ? s.bar_body_pct + '%' : '—',
+  setInd('indBarBody', s.bar_body_pct != null ? s.bar_body_pct + '%' : '—',
     s.bar_body_pct > 70 ? 'hot' : '');
 
   // Close position
-  setInd('indBarPos', s.bar_close_pos !== undefined ? s.bar_close_pos + '%' : '—',
+  setInd('indBarPos', s.bar_close_pos != null ? s.bar_close_pos + '%' : '—',
     s.bar_close_pos > 70 ? 'bull' : s.bar_close_pos < 30 ? 'bear' : '');
 }
 
