@@ -140,12 +140,14 @@ class SignalDashboardServer:
                 req.add_header('X-Push-Secret', self.relay_secret)
             
             with urllib.request.urlopen(req, timeout=3) as response:
-                if response.status not in (200, 201):
-                    log.warning(f"Relay push failed: {response.status}")
+                if response.status in (200, 201):
+                    log.debug("✅ Relay push OK (%d bytes)", len(payload))
+                else:
+                    log.warning("Relay push failed: %s", response.status)
         except urllib.error.URLError as e:
-            log.error(f"Relay push failed (URLError): {e.reason}")
+            log.error("Relay push failed (URLError): %s", e.reason)
         except Exception as e:
-            log.error(f"Relay push failed: {e}")
+            log.error("Relay push failed: %s", e)
 
     # ── TCP Feed (reuses tcp_adapter patterns) ──
 
