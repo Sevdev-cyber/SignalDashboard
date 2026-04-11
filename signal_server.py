@@ -205,7 +205,6 @@ class SignalDashboardServer:
             self.bars_df = warmup_bars_to_df(adapter.warmup_bars)
 
             # Apply real tick-based delta ONLY on first warmup in this session
-            # On reconnect, skip tick processing (already done, saves 50+ seconds)
             if not self._warmup_done and adapter.warmup_ticks:
                 log.info("🎯 Processing %d warmup ticks for real delta/CVD/VWAP...", len(adapter.warmup_ticks))
                 self.bars_df = apply_tick_deltas(self.bars_df, adapter.warmup_ticks)
@@ -220,12 +219,12 @@ class SignalDashboardServer:
             self.bar_count = len(self.bars_df)
             if not self.bars_df.empty:
                 self.current_price = float(self.bars_df.iloc[-1]["close"])
-                # Initialize session CVD from warmup data (so live bars continue from correct value)
                 if "cum_delta" in self.bars_df.columns:
                     self._session_cvd = int(float(self.bars_df.iloc[-1].get("cum_delta", 0)))
                     log.info("📊 Session CVD initialized at %+d from warmup", self._session_cvd)
             log.info("✅ Warmup: %d bars loaded | price=%.2f", self.bar_count, self.current_price)
-            self._evaluate_and_broadcast()
+            # Schedule heavy signal evaluation OFF the TCP thread (non-blocking)
+            self.executor.submit(self._evaluate_and_broadcast)
 
         def on_bar_close(bar):
             from bar_builder import append_bar
@@ -262,10 +261,11 @@ class SignalDashboardServer:
             now = time.time()
             if not hasattr(self, '_last_full_broadcast'):
                 self._last_full_broadcast = 0
-            
+
             if now - self._last_full_broadcast >= 1:
                 self._last_full_broadcast = now
-                self._evaluate_and_broadcast()
+                # Schedule heavy signal evaluation OFF the TCP thread (non-blocking)
+                self.executor.submit(self._evaluate_and_broadcast)
 
         self._last_tick_broadcast = time.time()
 
