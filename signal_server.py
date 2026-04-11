@@ -374,6 +374,12 @@ class SignalDashboardServer:
         import random
         from bar_builder import enrich_bars
 
+        # Wait up to 3s for the asyncio loop to be set
+        for _ in range(30):
+            if self.loop:
+                break
+            time.sleep(0.1)
+
         log.info("🎭 DEMO MODE — generating simulated signals")
         price = 21500.0
         bars = []
