@@ -58,7 +58,7 @@ DAY_EDGES = {
     1: {"label": "Tuesday SHORT bias", "long_mult": 0.85, "short_mult": 1.20},
     2: {"label": "Wednesday neutral", "long_mult": 1.0, "short_mult": 1.0},
     3: {"label": "Thursday neutral", "long_mult": 1.0, "short_mult": 1.0},
-    4: {"label": "Friday NO SHORTS", "long_mult": 1.0, "short_mult": 0.50},
+    4: {"label": "Friday standard", "long_mult": 1.0, "short_mult": 1.0},
 }
 
 
@@ -115,6 +115,11 @@ class SignalEngine:
         if not candidates:
             return []
 
+        # LIVE ONLY: We no longer arbitrarily drop old signals (like yesterday's FVGs).
+        # HSB generators yield signals that are ACTUALLY computationally pending.
+        # So whatever the generator yields, we pass it to the UI!
+        # (Generator itself is responsible for expiring dead setups)
+        
         # Extract regime info
         regime = ctx.regime.regime if ctx.regime else "unknown"
         atr = ctx.atr if ctx.atr else 20.0
@@ -146,9 +151,15 @@ class SignalEngine:
                 tp3 = cand.entry_price - risk * 4.0
                 invalidation = cand.sl_price
 
-            # Use candidate's own TP if available
+            # Use candidate's own TP if available AND directionally valid
             if hasattr(cand, "tp1_price") and not math.isnan(cand.tp1_price):
-                tp1 = cand.tp1_price
+                cand_tp1 = cand.tp1_price
+                # Sanity: LONG target must be ABOVE entry, SHORT target must be BELOW entry
+                if direction == "long" and cand_tp1 > cand.entry_price:
+                    tp1 = cand_tp1
+                elif direction == "short" and cand_tp1 < cand.entry_price:
+                    tp1 = cand_tp1
+                # else: keep the risk-based default tp1 (which is always directionally correct)
 
             # Regime multiplier
             base_source = source_type.split("_")[1] if "_" in source_type and len(source_type.split("_")) > 1 else source_type

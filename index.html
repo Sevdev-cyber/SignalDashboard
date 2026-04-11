@@ -6,6 +6,7 @@
 <title>MNQ Signal Radar — Live Dashboard</title>
 <meta name="description" content="Real-time MNQ signal dashboard with confidence scores, confluence analysis, and regime detection">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -271,7 +272,10 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg-primary);color
 <div class="main">
 
   <!-- LEFT: Signals -->
-  <div class="signals-panel">
+  <div class="signals-panel" id="signalsPanel">
+
+    <!-- CHART -->
+    <div id="tvchart" style="width: 100%; height: 400px; margin-bottom: 24px; border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; background: var(--bg-card)"></div>
 
     <!-- TOP SIGNALS -->
     <div class="section-title">
@@ -357,12 +361,17 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg-primary);color
 </div>
 
 <script>
-const WS_URL = `ws://${location.hostname || 'localhost'}:8080`;
+const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
 const TOP_N = 8;
 let ws = null;
 let reconnectTimer = null;
 let lastPrice = 0;
 let restOpen = false;
+
+// Chart state
+let chart = null;
+let candleSeries = null;
+let priceLines = [];
 
 function connect() {
   ws = new WebSocket(WS_URL);
@@ -380,6 +389,7 @@ function connect() {
     try {
       const d = JSON.parse(e.data);
       if (d.type === 'full_update') {
+        if (d.bars) updateChartHistory(d.bars);
         updateState(d.state);
         updateIndicators(d.state);
         updateSignals(d.signals);
@@ -394,6 +404,57 @@ function connect() {
   };
 }
 
+// ═══ CHART ═══
+function initChart() {
+  if (chart) return;
+  const container = $('tvchart');
+  chart = LightweightCharts.createChart(container, {
+    layout: { background: { type: 'solid', color: '#1a1f35' }, textColor: '#94a3b8' },
+    grid: { vertLines: { color: 'rgba(255,255,255,0.05)' }, horzLines: { color: 'rgba(255,255,255,0.05)' } },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    rightPriceScale: { borderColor: 'rgba(255,255,255,0.1)' },
+    timeScale: { borderColor: 'rgba(255,255,255,0.1)', timeVisible: true, secondsVisible: false },
+  });
+  
+  candleSeries = chart.addCandlestickSeries({
+    upColor: '#10b981', downColor: '#ef4444', borderVisible: false,
+    wickUpColor: '#10b981', wickDownColor: '#ef4444'
+  });
+
+  new ResizeObserver(entries => {
+    if (entries.length === 0 || entries[0].target !== container) return;
+    const newRect = entries[0].contentRect;
+    chart.applyOptions({ width: newRect.width, height: newRect.height });
+  }).observe(container);
+}
+
+function updateChartHistory(bars) {
+  if (!chart) initChart();
+  if (!bars || !bars.length) return;
+  // Dedup and sort
+  const unique = [];
+  const times = new Set();
+  for (let b of bars) {
+    if (!times.has(b.time)) { times.add(b.time); unique.push(b); }
+  }
+  unique.sort((a,b) => a.time - b.time);
+  try { candleSeries.setData(unique); } catch(e) {}
+}
+
+function updateChartTick(s) {
+  if (!chart || !candleSeries || !s.price || !s.timestamp) return;
+  const ts = Math.floor(new Date(s.timestamp).getTime() / 1000);
+  try {
+    candleSeries.update({
+      time: ts,
+      open: s.price,
+      high: s.price,
+      low: s.price,
+      close: s.price
+    });
+  } catch(e) {}
+}
+
 // ═══ STATE ═══
 function updateState(s) {
   if (!s) return;
@@ -405,6 +466,7 @@ function updateState(s) {
       $('priceChange').className = 'price-change ' + (d >= 0 ? 'up' : 'down');
     }
     lastPrice = s.price;
+    updateChartTick(s);
   }
   txt('statAtr', s.atr?.toFixed(1) || '—');
   txt('statVwap', s.vwap?.toFixed(2) || '—');
@@ -450,7 +512,14 @@ function updateSignals(signals) {
     }
   }
   for (const k of Object.keys(seen)) deduped.push(seen[k]);
-  deduped.sort((a,b) => b.confidence_pct - a.confidence_pct);
+  
+  // Sort by distance to current price
+  const p = lastPrice || 0;
+  deduped.sort((a,b) => {
+    const distA = Math.abs(a.entry - p);
+    const distB = Math.abs(b.entry - p);
+    return distA - distB;
+  });
 
   const top = deduped.slice(0, TOP_N);
   const rest = deduped.slice(TOP_N);
@@ -458,6 +527,18 @@ function updateSignals(signals) {
   txt('topCount', top.length);
   txt('statSignals', top.length);
   txt('statTotal', deduped.length);
+
+  // Update chart lines
+  if (candleSeries) {
+    priceLines.forEach(l => candleSeries.removePriceLine(l));
+    priceLines = [];
+    top.forEach((sig) => {
+      const cLabel = sig.direction === 'long' ? '#10b981' : '#ef4444';
+      if(sig.entry) priceLines.push(candleSeries.createPriceLine({ price: sig.entry, color: cLabel, lineWidth: 2, lineStyle: 2, axisLabelVisible: true, title: sig.name + ' ENTRY' }));
+      if(sig.tp1) priceLines.push(candleSeries.createPriceLine({ price: sig.tp1, color: '#06b6d4', lineWidth: 1, lineStyle: 1, axisLabelVisible: true, title: 'TP' }));
+      if(sig.invalidation) priceLines.push(candleSeries.createPriceLine({ price: sig.invalidation, color: '#f59e0b', lineWidth: 1, lineStyle: 1, axisLabelVisible: true, title: 'SL' }));
+    });
+  }
 
   // TOP cards
   const topEl = $('topSignals');
@@ -723,6 +804,8 @@ function txt(id, v) { const e = $(id); if (e) e.textContent = v; }
 function mk(tag, cls, text) { const e = document.createElement(tag); e.className = cls; e.textContent = text; return e; }
 function confClass(pct) { return pct >= 70 ? 'high' : pct >= 45 ? 'medium' : 'low'; }
 
+// ═══ INIT ═══
+initChart();
 connect();
 </script>
 </body>

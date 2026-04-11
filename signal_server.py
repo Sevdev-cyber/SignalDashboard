@@ -67,9 +67,11 @@ class SignalDashboardServer:
 
         # WebSocket clients
         self._ws_clients: set = set()
+        self.active_signals: dict = {}
         self._latest_state: dict = {}
         self._latest_signals: list[dict] = []
         self._latest_zones: dict = {}
+        self.loop = None
 
     # ── WebSocket Server ──
 
@@ -109,19 +111,24 @@ class SignalDashboardServer:
             log.info("🌐 WS client disconnected: %s", peer)
 
     async def _broadcast(self, data: dict):
-        """Send data to all connected WebSocket clients."""
-        if not self._ws_clients:
-            return
+        """Send data to all connected WebSocket clients AND to the relay."""
         msg = self._safe_json(data)
         
-        # Optional: push to relay HTTP server
+        # ALWAYS push to relay HTTP server (regardless of local WS clients)
         if self.relay_url:
-            asyncio.get_event_loop().run_in_executor(
-                self.executor, self._push_to_relay, msg
-            )
+            try:
+                asyncio.get_event_loop().run_in_executor(
+                    self.executor, self._push_to_relay, msg
+                )
+            except Exception as e:
+                log.error("Relay dispatch error: %s", e)
+
+        # Then broadcast to local WS clients (if any)
+        if not self._ws_clients:
+            return
 
         dead = set()
-        for ws in self._ws_clients:
+        for ws in list(self._ws_clients):
             try:
                 await ws.send(msg)
             except Exception:
@@ -140,9 +147,9 @@ class SignalDashboardServer:
                 if response.status not in (200, 201):
                     log.warning(f"Relay push failed: {response.status}")
         except urllib.error.URLError as e:
-            log.debug(f"Relay push failed (URLError): {e.reason}")
+            log.error(f"Relay push failed (URLError): {e.reason}")
         except Exception as e:
-            log.debug(f"Relay push failed: {e}")
+            log.error(f"Relay push failed: {e}")
 
     # ── TCP Feed (reuses tcp_adapter patterns) ──
 
@@ -169,14 +176,18 @@ class SignalDashboardServer:
             from bar_builder import append_bar
             if self.bars_df.empty:
                 return
-            self.bars_df = append_bar(self.bars_df, bar)
+
+            # Compute actual delta from tick data before appending
+            total_vol = self._bar_buy_vol + self._bar_sell_vol
+            true_delta = self._bar_buy_vol - self._bar_sell_vol
+            
+            if total_vol > 0:
+                self._bar_delta_pct = (true_delta) / total_vol * 100
+            
+            self.bars_df = append_bar(self.bars_df, bar, true_delta=true_delta)
             self.bar_count += 1
             last = self.bars_df.iloc[-1]
-
-            # Compute bar delta from ticks
-            total_vol = self._bar_buy_vol + self._bar_sell_vol
-            if total_vol > 0:
-                self._bar_delta_pct = (self._bar_buy_vol - self._bar_sell_vol) / total_vol * 100
+            
             self._bar_buy_vol = 0
             self._bar_sell_vol = 0
 
@@ -185,7 +196,13 @@ class SignalDashboardServer:
                      self.bar_count, self.current_price,
                      float(last.get("atr", 0)), self._bar_delta_pct)
 
-            self._evaluate_and_broadcast()
+            now = time.time()
+            if not hasattr(self, '_last_full_broadcast'):
+                self._last_full_broadcast = 0
+            
+            if now - self._last_full_broadcast >= 3:
+                self._last_full_broadcast = now
+                self._evaluate_and_broadcast()
 
         self._last_tick_broadcast = time.time()
 
@@ -196,9 +213,22 @@ class SignalDashboardServer:
             elif tick.aggressor == 2:
                 self._bar_sell_vol += tick.size
 
-            # Broadcast tick update every 15 seconds
+            # Validate internal memory - drop signals that hit TP or SL
+            to_remove = []
+            for sid, s in self.active_signals.items():
+                if s["direction"] == "long":
+                    if self.current_price <= s["sl"] or self.current_price >= s["tp1"]:
+                        to_remove.append(sid)
+                else: # short
+                    if self.current_price >= s["sl"] or self.current_price <= s["tp1"]:
+                        to_remove.append(sid)
+                        
+            for r in to_remove:
+                del self.active_signals[r]
+
+            # Broadcast tick update every 4 seconds
             now = time.time()
-            if now - self._last_tick_broadcast >= 15:
+            if now - self._last_tick_broadcast >= 4:
                 self._last_tick_broadcast = now
                 self._tick_update()
 
@@ -227,38 +257,82 @@ class SignalDashboardServer:
 
     def _evaluate_and_broadcast(self):
         """Run signal engine and broadcast results."""
-        signals = self.engine.evaluate(
+        new_signals = self.engine.evaluate(
             self.bars_df,
             bar_delta_pct=self._bar_delta_pct,
             current_price=self.current_price,
         )
+        
+        # Memory tracking
+        now_ts = int(time.time() * 1000)
+        # 1. Update existing or add new
+        for s in new_signals:
+            matched = False
+            for sid, acts in self.active_signals.items():
+                # Matching identical setups
+                if acts["name"] == s["name"] and acts["direction"] == s["direction"] and abs(acts["entry"] - s["entry"]) < 0.25:
+                    if s["confidence_pct"] > acts["confidence_pct"]:
+                        acts["confidence_pct"] = s["confidence_pct"]
+                    matched = True
+                    break
+                    
+            if not matched:
+                s["creation_time"] = now_ts
+                # Remember what bar it originated on
+                s["origin_bar"] = int(self.bar_count)
+                try:
+                    s["origin_time"] = int(self.bars_df.iloc[-1]["datetime"].timestamp())
+                except:
+                    s["origin_time"] = int(time.time())
+                self.active_signals[s["id"]] = s
+
         state = self.engine.get_market_state(
             self.bars_df,
             current_price=self.current_price,
             bar_delta_pct=self._bar_delta_pct,
         )
-        zones = self.engine.compute_weighted_zones(signals)
+        
+        # Convert dictionary to descending sorted list for broadcast
+        signals_payload = list(self.active_signals.values())
+        signals_payload.sort(key=lambda x: x["confidence_pct"], reverse=True)
+        
+        zones = self.engine.compute_weighted_zones(signals_payload)
 
         self._latest_state = state
-        self._latest_signals = signals
+        self._latest_signals = signals_payload
         self._latest_zones = zones
 
-        log.info("📡 Broadcasting: %d signals | price=%.2f | regime=%s",
-                 len(signals), self.current_price, state.get("regime", "?"))
+        # Extract recent candlestick history for TradingView chart (last 100 bars)
+        bars_for_chart = []
+        if not self.bars_df.empty:
+            recent = self.bars_df.tail(100)
+            for _, row in recent.iterrows():
+                dt = row.get("datetime")
+                if pd.isna(dt): continue
+                # Lightweight Charts requires unix timestamp in seconds
+                try:
+                    ts = int(dt.timestamp())
+                except AttributeError:
+                    ts = int(pd.to_datetime(dt).timestamp())
+                bars_for_chart.append({
+                    "time": ts,
+                    "open": float(row["open"]),
+                    "high": float(row["high"]),
+                    "low": float(row["low"]),
+                    "close": float(row["close"]),
+                    "cum_delta": float(row.get("cum_delta", 0.0)),
+                })
 
-        # Schedule broadcast on the event loop
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                asyncio.ensure_future(self._broadcast({
-                    "type": "full_update",
-                    "state": state,
-                    "signals": signals,
-                    "zones": zones,
-                    "history": self.engine.get_history(),
-                }))
-        except Exception:
-            pass
+        # Schedule broadcast on the event loop safely from the TCP thread
+        if self.loop:
+            asyncio.run_coroutine_threadsafe(self._broadcast({
+                "type": "full_update",
+                "state": state,
+                "signals": signals,
+                "zones": zones,
+                "history": self.engine.get_history(),
+                "bars": bars_for_chart,
+            }), self.loop)
 
     def _tick_update(self):
         """Broadcast lightweight tick update every 15 seconds."""
@@ -273,16 +347,12 @@ class SignalDashboardServer:
         )
         self._latest_state = state
 
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                asyncio.ensure_future(self._broadcast({
-                    "type": "tick_update",
-                    "state": state,
-                    "zones": self._latest_zones,
-                }))
-        except Exception:
-            pass
+        if self.loop:
+            asyncio.run_coroutine_threadsafe(self._broadcast({
+                "type": "tick_update",
+                "state": state,
+                "zones": self._latest_zones,
+            }), self.loop)
 
     # ── Demo Mode ──
 
@@ -340,6 +410,9 @@ class SignalDashboardServer:
                  self.tcp_host, self.tcp_port, self.ws_port)
         log.info("  Mode: %s", "DEMO" if self.demo else "LIVE")
         log.info("=" * 60)
+
+        # Store main loop for thread-safe broadcasting
+        self.loop = asyncio.get_running_loop()
 
         # Start TCP reader in background
         self._start_tcp_reader()

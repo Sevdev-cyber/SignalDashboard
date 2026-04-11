@@ -1,0 +1,16 @@
+2026-04-10 21:26:04,478 [signal_dash   ] INFO   ============================================================
+2026-04-10 21:26:04,479 [signal_dash   ] INFO     📡 SIGNAL DASHBOARD SERVER
+2026-04-10 21:26:04,479 [signal_dash   ] INFO     TCP: 127.0.0.1:5557 | WS: localhost:8080
+2026-04-10 21:26:04,479 [signal_dash   ] INFO     Mode: LIVE
+2026-04-10 21:26:04,479 [signal_dash   ] INFO   ============================================================
+/Users/sacredforest/Trading Setup/SignalDashboard/signal_server.py:371: DeprecationWarning: websockets.server.serve is deprecated
+  async with websockets.server.serve(
+2026-04-10 21:26:04,480 [jajcus.tcp    ] INFO   Connected to TickStreamerMirror 127.0.0.1:5557
+2026-04-10 21:26:04,480 [jajcus.tcp    ] INFO   [DRY] PING
+2026-04-10 21:26:04,482 [websockets.server] INFO   server listening on 0.0.0.0:8080
+2026-04-10 21:26:04,482 [signal_dash   ] INFO   🌐 WebSocket server listening on ws://0.0.0.0:8080
+2026-04-10 21:26:04,482 [signal_dash   ] INFO   📊 Open dashboard: http://localhost:8081
+2026-04-10 21:26:04,644 [jajcus.tcp    ] INFO   Received 200 warmup bars
+2026-04-10 21:26:04,652 [signal_dash   ] INFO   ✅ Warmup: 200 bars loaded | price=25301.25
+2026-04-10 21:26:04,861 [signal_dash   ] INFO   BAR 201 | C=25295.00 | ATR=27.9 | delta=0%
+2026-04-10 21:30:00,209 [signal_dash   ] INFO   BAR 202 | C=25305.00 | ATR=26.8 | delta=11%

@@ -263,6 +263,7 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg-primary);color
   <div class="stat"><span class="stat-label">EMA 20</span><span class="stat-value" id="statEma20">—</span></div>
   <div class="stat"><span class="stat-label">EMA 50</span><span class="stat-value" id="statEma50">—</span></div>
   <div class="stat"><span class="stat-label">Delta</span><span class="stat-value" id="statDelta">—</span></div>
+  <div class="stat"><span class="stat-label">CVD</span><span class="stat-value" id="statCvd">—</span></div>
   <div class="stat"><span class="stat-label">Top Signals</span><span class="stat-value" id="statSignals">0</span></div>
   <div class="stat"><span class="stat-label">Total</span><span class="stat-value" id="statTotal">0</span></div>
   <div class="stat"><span class="stat-label">Updated</span><span class="stat-value" id="statTime">—</span></div>
@@ -417,13 +418,24 @@ function initChart() {
     layout: { background: { type: 'solid', color: '#1a1f35' }, textColor: '#94a3b8' },
     grid: { vertLines: { color: 'rgba(255,255,255,0.05)' }, horzLines: { color: 'rgba(255,255,255,0.05)' } },
     crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
-    rightPriceScale: { borderColor: 'rgba(255,255,255,0.1)' },
+    rightPriceScale: { borderColor: 'rgba(255,255,255,0.1)', scaleMargins: { top: 0.05, bottom: 0.25 } },
     timeScale: { borderColor: 'rgba(255,255,255,0.1)', timeVisible: true, secondsVisible: false },
   });
   
   candleSeries = chart.addCandlestickSeries({
     upColor: '#10b981', downColor: '#ef4444', borderVisible: false,
     wickUpColor: '#10b981', wickDownColor: '#ef4444'
+  });
+
+  cvdSeries = chart.addHistogramSeries({
+    color: 'rgba(56, 189, 248, 0.4)',
+    priceFormat: { type: 'volume' },
+    priceScaleId: 'cvd',
+  });
+
+  chart.priceScale('cvd').applyOptions({
+    scaleMargins: { top: 0.8, bottom: 0 },
+    borderVisible: false,
   });
 
   new ResizeObserver(entries => {
@@ -447,7 +459,19 @@ function updateChartHistory(bars) {
       lastBarLow = lastBar.low;
   }
   
-  try { candleSeries.setData(unique); } catch(e) { console.error("History setData error:", e); }
+  try { 
+      candleSeries.setData(unique); 
+      
+      const cvdData = bars.filter(b => b.cum_delta !== undefined).map(b => ({
+          time: b.time,
+          value: b.cum_delta,
+          color: b.cum_delta >= 0 ? 'rgba(16, 185, 129, 0.6)' : 'rgba(239, 68, 68, 0.6)'
+      }));
+      if (cvdData.length > 0 && cvdSeries) {
+          cvdSeries.setData(cvdData);
+      }
+      
+  } catch(e) { console.error("History setData error:", e); }
 }
 
 function updateChartTick(s) {
@@ -462,6 +486,14 @@ function updateChartTick(s) {
       low: lastBarLow,
       close: s.price
     });
+    
+    if (cvdSeries && s.cum_delta !== undefined) {
+        cvdSeries.update({
+            time: lastBarTime,
+            value: s.cum_delta,
+            color: s.cum_delta >= 0 ? 'rgba(16, 185, 129, 0.6)' : 'rgba(239, 68, 68, 0.6)'
+        });
+    }
   } catch(e) { console.error("Tick update error:", e); }
 }
 
@@ -487,6 +519,12 @@ function updateState(s) {
     de.textContent = (s.delta_pct >= 0 ? '+' : '') + s.delta_pct.toFixed(0) + '%';
     de.className = 'stat-value ' + (s.delta_pct > 5 ? 'positive' : s.delta_pct < -5 ? 'negative' : '');
   }
+  const cvd = $('statCvd');
+  if (s.cum_delta !== undefined) {
+    cvd.textContent = (s.cum_delta >= 0 ? '+' : '') + s.cum_delta.toFixed(0);
+    cvd.className = 'stat-value ' + (s.cum_delta > 0 ? 'positive' : s.cum_delta < 0 ? 'negative' : '');
+  }
+
   if (s.timestamp) txt('statTime', new Date(s.timestamp).toLocaleTimeString());
 
   // Badges
@@ -538,11 +576,14 @@ function updateSignals(signals) {
   txt('statSignals', top.length);
   txt('statTotal', deduped.length);
 
-  // Update chart lines
+  // Update chart lines and markers
   if (candleSeries) {
     priceLines.forEach(l => candleSeries.removePriceLine(l));
     priceLines = [];
-    top.forEach((sig) => {
+    let markers = [];
+    
+    // helper to add markers and lines
+    const processSig = (sig) => {
       const cLabel = sig.direction === 'long' ? '#10b981' : '#ef4444';
       const confStr = sig.confidence_pct ? Math.round(sig.confidence_pct) + '%' : '';
       const baseName = `${sig.name} ${confStr}`.trim();
@@ -550,7 +591,25 @@ function updateSignals(signals) {
       if(sig.entry) priceLines.push(candleSeries.createPriceLine({ price: sig.entry, color: cLabel, lineWidth: 2, lineStyle: 2, axisLabelVisible: true, title: baseName + ' ENTRY' }));
       if(sig.tp1) priceLines.push(candleSeries.createPriceLine({ price: sig.tp1, color: '#06b6d4', lineWidth: 1, lineStyle: 1, axisLabelVisible: true, title: baseName + ' TP' }));
       if(sig.invalidation) priceLines.push(candleSeries.createPriceLine({ price: sig.invalidation, color: '#f59e0b', lineWidth: 1, lineStyle: 1, axisLabelVisible: true, title: baseName + ' SL' }));
-    });
+
+      if (sig.origin_time) {
+          markers.push({
+              time: sig.origin_time,
+              position: sig.direction === 'long' ? 'belowBar' : 'aboveBar',
+              color: cLabel,
+              shape: sig.direction === 'long' ? 'arrowUp' : 'arrowDown',
+              text: baseName
+          });
+      }
+    };
+
+    top.forEach(processSig);
+    rest.forEach(processSig);
+    
+    markers.sort((a,b) => a.time - b.time);
+    try {
+        candleSeries.setMarkers(markers);
+    } catch(e) { console.error("Marker error", e); }
   }
 
   // TOP cards
