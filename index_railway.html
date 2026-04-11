@@ -601,7 +601,8 @@ function updateSignals(signals) {
               position: sig.direction === 'long' ? 'belowBar' : 'aboveBar',
               color: cLabel,
               shape: sig.direction === 'long' ? 'arrowUp' : 'arrowDown',
-              text: baseName
+              text: sig.direction.toUpperCase() + ' ENTRY',
+              size: 2
           });
       }
     };

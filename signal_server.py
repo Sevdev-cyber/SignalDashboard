@@ -215,12 +215,13 @@ class SignalDashboardServer:
 
             # Validate internal memory - drop signals that hit TP or SL
             to_remove = []
-            for sid, s in self.active_signals.items():
+            for sid, s in list(self.active_signals.items()):
+                buffer = 1.0  # 1 point (4 MNQ ticks) margin
                 if s["direction"] == "long":
-                    if self.current_price <= s["sl"] or self.current_price >= s["tp1"]:
+                    if self.current_price <= s["sl"] + buffer or self.current_price >= s["tp1"] - buffer:
                         to_remove.append(sid)
                 else: # short
-                    if self.current_price >= s["sl"] or self.current_price <= s["tp1"]:
+                    if self.current_price >= s["sl"] - buffer or self.current_price <= s["tp1"] + buffer:
                         to_remove.append(sid)
                         
             for r in to_remove:
