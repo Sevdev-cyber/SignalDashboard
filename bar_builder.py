@@ -43,8 +43,7 @@ def enrich_bars(df: pd.DataFrame) -> pd.DataFrame:
     frame["atr"] = tr.rolling(14, min_periods=1).mean()
 
     # Cumulative delta
-    if "cum_delta" not in frame.columns:
-        frame["cum_delta"] = frame["delta"].cumsum()
+    frame["cum_delta"] = frame["delta"].cumsum()
 
     # VWAP — uses Typical Price = (H+L+C)/3 per industry standard
     typical_price = (frame["high"] + frame["low"] + frame["close"]) / 3
