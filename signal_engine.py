@@ -227,8 +227,37 @@ class SignalEngine:
             sig["confluence_count"] = len(confirming) + 1  # Wliczamy samych siebie
             sig["confirming_signals"] = confirming
 
+        # Compute EMA50 slope for trend filtering
+        ema50_trend = "flat"
+        vwap_price = 0.0
+        close_price = 0.0
+        if "ema50" in bars_df.columns and len(bars_df) >= 3:
+            ema50_last = bars_df["ema50"].iloc[-1]
+            ema50_prev = bars_df["ema50"].iloc[-3]
+            if ema50_last < ema50_prev - 1.5:
+                ema50_trend = "down"
+            elif ema50_last > ema50_prev + 1.5:
+                ema50_trend = "up"
+        if "vwap" in bars_df.columns and not bars_df.empty:
+            vwap_price = bars_df["vwap"].iloc[-1]
+        if "close" in bars_df.columns and not bars_df.empty:
+            close_price = bars_df["close"].iloc[-1]
+
         # POST-PROCESSING: Wzmacnianie i dławienie sygnałów według wyników testu 120-dniowego
         for sig in enriched:
+            # 0. Twarde wycięcie trucizn (FVG_FILL, BOS_BULL)
+            if "FVG_FILL" in sig["name"] or "BOS_BULL" in sig["name"]:
+                sig["confidence_pct"] = 0
+                continue
+                
+            # 0b. Trend filter dla PULLBACK
+            if "PULLBACK" in sig["name"]:
+                if sig["direction"] == "long" and ema50_trend == "down" and close_price < vwap_price:
+                    sig["confidence_pct"] = 0  # Blokada longów w twardym downtrendzie
+                    continue
+                if sig["direction"] == "short" and ema50_trend == "up" and close_price > vwap_price:
+                    sig["confidence_pct"] = 0  # Blokada shortów w twardym uptrendzie
+                    continue
             # 1. Rule of 4 (Kaganiec na brak konfluencji)
             #    < 4 konfluencje = historycznie 1-19% WR → obcinamy o połowę
             if sig["confluence_count"] < 4:
