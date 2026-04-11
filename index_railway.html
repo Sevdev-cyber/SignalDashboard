@@ -657,6 +657,7 @@ function createHeroCard(sig, rank) {
       <div class="hero-name">
         <span class="dir-badge ${sig.direction}">${sig.direction === 'long' ? '▲ LONG' : '▼ SHORT'}</span>
         ${sig.name}
+        <span style="margin-left: 8px; font-size: 0.6rem; color: #10b981; letter-spacing: 0.5px; animation: pulse 2s infinite;">● ACTIVE MEMORY</span>
       </div>
       <div class="hero-conf">
         <div class="hero-conf-value ${cc}">${sig.confidence_pct}%</div>
