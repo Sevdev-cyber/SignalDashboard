@@ -328,7 +328,7 @@ class SignalDashboardServer:
             asyncio.run_coroutine_threadsafe(self._broadcast({
                 "type": "full_update",
                 "state": state,
-                "signals": signals,
+                "signals": signals_payload,
                 "zones": zones,
                 "history": self.engine.get_history(),
                 "bars": bars_for_chart,
