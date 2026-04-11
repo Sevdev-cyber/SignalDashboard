@@ -241,7 +241,7 @@ class SignalDashboardServer:
                 self._tick_update()
 
         def on_heartbeat(meta):
-            pass  # silently consume
+            adapter.ping()  # keep connection alive
 
         adapter.on_warmup_complete = on_warmup
         adapter.on_bar_close = on_bar_close
