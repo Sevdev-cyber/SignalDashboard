@@ -36,15 +36,16 @@ def enrich_bars(df: pd.DataFrame) -> pd.DataFrame:
     """Add technical indicators to OHLCV DataFrame."""
     frame = df.copy()
 
-    # Delta: estimate from OHLCV if not present (warmup bars lack tick data)
+    # Delta: estimate from OHLCV for bars that lack tick data (delta==0)
+    # Per-bar estimation — doesn't skip bars that already have real tick delta
     if "delta" not in frame.columns:
         frame["delta"] = 0.0
-    if frame["delta"].abs().sum() == 0:
+    mask = frame["delta"] == 0
+    if mask.any():
         bar_range = frame["high"] - frame["low"]
         close_pos = (frame["close"] - frame["low"]) / bar_range.replace(0, np.nan)
         close_pos = close_pos.fillna(0.5)
         delta_pct = (close_pos * 2 - 1)
-        mask = frame["delta"] == 0
         frame.loc[mask, "delta"] = (delta_pct[mask] * frame["volume"][mask]).fillna(0)
 
     if "buy_volume" not in frame.columns:
@@ -96,7 +97,6 @@ def enrich_bars(df: pd.DataFrame) -> pd.DataFrame:
     frame["rsi"] = (100 - 100 / (1 + rs)).fillna(50.0)
 
     frame["session"] = "jajcus_live"
-    frame.drop(columns=["trade_value", "tick_vwap_value"], errors="ignore", inplace=True)
 
     return frame.reset_index(drop=True)
 
@@ -113,7 +113,11 @@ def apply_tick_deltas(bars_df: pd.DataFrame, warmup_ticks: list) -> pd.DataFrame
     frame = bars_df.copy()
 
     # Bar close times as int64 nanoseconds (bars are sorted chronologically)
-    bar_close_ns = pd.to_datetime(frame["datetime"]).values.astype(np.int64)
+    bar_dt = pd.to_datetime(frame["datetime"])
+    # Strip timezone if present (both bar/tick should be same tz from NT)
+    if hasattr(bar_dt.dt, 'tz') and bar_dt.dt.tz is not None:
+        bar_dt = bar_dt.dt.tz_localize(None)
+    bar_close_ns = bar_dt.values.astype(np.int64)
 
     # Collect raw tick data
     tick_times_raw = []
@@ -130,7 +134,16 @@ def apply_tick_deltas(bars_df: pd.DataFrame, warmup_ticks: list) -> pd.DataFrame
         return bars_df
 
     # Batch-convert timestamps
-    tick_ns = pd.to_datetime(tick_times_raw).values.astype(np.int64)
+    tick_dt = pd.to_datetime(tick_times_raw)
+    if hasattr(tick_dt, 'tz') and tick_dt.tz is not None:
+        tick_dt = tick_dt.tz_localize(None)
+    tick_ns = tick_dt.values.astype(np.int64)
+
+    # Debug: log time ranges to diagnose bar assignment issues
+    log.info("Bar time range: %s → %s (%d bars)",
+             bar_dt.iloc[0], bar_dt.iloc[-1], len(bar_dt))
+    log.info("Tick time range: %s → %s (%d ticks)",
+             tick_dt[0], tick_dt[-1], len(tick_dt))
     tick_prices = np.array(tick_prices, dtype=np.float64)
     tick_sizes = np.array(tick_sizes, dtype=np.int64)
     tick_aggrs = np.array(tick_aggrs, dtype=np.int32)
@@ -162,8 +175,12 @@ def apply_tick_deltas(bars_df: pd.DataFrame, warmup_ticks: list) -> pd.DataFrame
     frame.loc[has_ticks, "buy_volume"] = bar_buy[has_ticks].astype(float)
     frame.loc[has_ticks, "sell_volume"] = bar_sell[has_ticks].astype(float)
 
-    log.info("Tick delta: %d ticks → %d/%d bars with real delta",
-             tick_count, real_count, len(frame))
+    # Distribution stats for debugging
+    unique_bars = np.unique(bar_indices)
+    log.info("Tick delta: %d ticks → %d/%d bars with real delta | bar range: [%d..%d]",
+             tick_count, real_count, len(frame),
+             int(unique_bars[0]) if len(unique_bars) > 0 else -1,
+             int(unique_bars[-1]) if len(unique_bars) > 0 else -1)
 
     return enrich_bars(frame)
 
@@ -191,7 +208,7 @@ def warmup_bars_to_df(warmup_bars: list) -> pd.DataFrame:
 
 
 def append_bar(bars_df: pd.DataFrame, bar, true_delta: float = 0.0,
-               trade_value: float = 0.0) -> pd.DataFrame:
+               **kwargs) -> pd.DataFrame:
     """Append a new bar and re-enrich."""
     new_row = {
         "datetime": pd.to_datetime(bar.timestamp),
