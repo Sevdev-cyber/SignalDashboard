@@ -461,8 +461,16 @@ function initChart() {
   predOverlay.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:5;overflow:visible';
   container.appendChild(predOverlay);
 
-  // Re-render predictions on scroll/zoom
+  // Re-render predictions on ANY chart interaction (horizontal + vertical)
   chart.timeScale().subscribeVisibleLogicalRangeChange(() => renderPredictions());
+  let predThrottle = 0;
+  chart.subscribeCrosshairMove(() => {
+    const now = Date.now();
+    if (now - predThrottle > 80) {
+      predThrottle = now;
+      renderPredictions();
+    }
+  });
 }
 
 function updateChartHistory(bars) {
