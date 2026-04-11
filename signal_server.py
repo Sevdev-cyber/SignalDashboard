@@ -383,43 +383,80 @@ class SignalDashboardServer:
             time.sleep(0.1)
 
         log.info("🎭 DEMO MODE — generating simulated signals")
-        price = 21500.0
+        CENTER_PRICE = 21500.0
+        price = CENTER_PRICE
         bars = []
 
-        while True:
-            # Generate a fake bar
-            atr = random.uniform(15, 40)
-            bar_open = price + random.uniform(-5, 5)
-            bar_high = bar_open + random.uniform(3, atr * 0.8)
-            bar_low = bar_open - random.uniform(3, atr * 0.8)
-            bar_close = random.uniform(bar_low + 1, bar_high - 1)
-            volume = random.randint(500, 5000)
-            delta = random.uniform(-volume * 0.4, volume * 0.4)
-
+        # Prefill 80 historical bars (5-min bars going back ~7 hours)
+        BAR_SECS = 300  # 5 minutes per bar
+        now_ts = int(pd.Timestamp.now(tz="UTC").timestamp())
+        for i in range(80, 0, -1):
+            atr = random.uniform(15, 35)
+            # Mean-revert price to center
+            price += (CENTER_PRICE - price) * 0.05 + random.uniform(-8, 8)
+            bar_open = price + random.uniform(-3, 3)
+            bar_high = bar_open + random.uniform(2, atr * 0.5)
+            bar_low  = bar_open - random.uniform(2, atr * 0.5)
+            bar_close = random.uniform(bar_low + 0.5, bar_high - 0.5)
+            volume = random.randint(800, 4000)
+            delta = random.uniform(-volume * 0.35, volume * 0.35)
+            bar_dt = pd.Timestamp((now_ts - i * BAR_SECS), unit="s", tz="UTC")
             bars.append({
-                "timestamp": pd.Timestamp.now(tz="UTC"),
+                "timestamp": bar_dt,
+                "datetime":  bar_dt,
                 "open": bar_open, "high": bar_high,
-                "low": bar_low, "close": bar_close,
+                "low": bar_low,   "close": bar_close,
                 "volume": volume, "delta": delta,
             })
+            price = bar_close
 
+        self.bars_df = pd.DataFrame(bars)
+        try:
+            self.bars_df = enrich_bars(self.bars_df)
+        except Exception as e:
+            log.warning("enrich_bars warmup error: %s", e)
+        self.bars_df["cum_delta"] = self.bars_df["delta"].cumsum()
+        self.bar_count = len(self.bars_df)
+        self.current_price = price
+        self._evaluate_and_broadcast()
+
+        while True:
+            # Mean-revert price to center, small random walk
+            price += (CENTER_PRICE - price) * 0.05 + random.uniform(-8, 8)
+            price = max(CENTER_PRICE - 200, min(CENTER_PRICE + 200, price))
+            atr = random.uniform(15, 35)
+            bar_open = price + random.uniform(-3, 3)
+            bar_high = bar_open + random.uniform(2, atr * 0.5)
+            bar_low  = bar_open - random.uniform(2, atr * 0.5)
+            bar_close = random.uniform(bar_low + 0.5, bar_high - 0.5)
+            volume = random.randint(800, 4000)
+            delta = random.uniform(-volume * 0.35, volume * 0.35)
+            bar_dt = pd.Timestamp.now(tz="UTC")
+
+            bars.append({
+                "timestamp": bar_dt,
+                "datetime":  bar_dt,
+                "open": bar_open, "high": bar_high,
+                "low": bar_low,   "close": bar_close,
+                "volume": volume, "delta": delta,
+            })
             if len(bars) > 200:
                 bars = bars[-200:]
 
             self.bars_df = pd.DataFrame(bars)
             try:
                 self.bars_df = enrich_bars(self.bars_df)
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning("enrich_bars error: %s", e)
             self.bars_df["cum_delta"] = self.bars_df["delta"].cumsum()
 
             price = bar_close
             self.current_price = price
-            self._bar_delta_pct = random.uniform(-30, 30)
+            self._bar_delta_pct = random.uniform(-25, 25)
             self.bar_count += 1
 
             self._evaluate_and_broadcast()
-            time.sleep(5)  # 5 seconds per "bar" in demo mode
+            time.sleep(5)
 
     # ── Main Run ──
 
