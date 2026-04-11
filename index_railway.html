@@ -557,31 +557,20 @@ function updateState(s) {
 function updateSignals(signals) {
   if (!signals) signals = [];
 
-  // Dedupe by source_type — keep only the highest confidence per type
-  const seen = {};
-  const deduped = [];
-  for (const sig of signals) {
-    const key = sig.source_type || sig.name;
-    if (!seen[key] || sig.confidence_pct > seen[key].confidence_pct) {
-      seen[key] = sig;
-    }
-  }
-  for (const k of Object.keys(seen)) deduped.push(seen[k]);
-  
   // Sort by distance to current price
   const p = lastPrice || 0;
-  deduped.sort((a,b) => {
+  signals.sort((a,b) => {
     const distA = Math.abs(a.entry - p);
     const distB = Math.abs(b.entry - p);
     return distA - distB;
   });
 
-  const top = deduped.slice(0, TOP_N);
-  const rest = deduped.slice(TOP_N);
+  const top = signals.slice(0, TOP_N);
+  const rest = signals.slice(TOP_N);
 
   txt('topCount', top.length);
   txt('statSignals', top.length);
-  txt('statTotal', deduped.length);
+  txt('statTotal', signals.length);
 
   // Update chart lines and markers
   if (candleSeries) {
