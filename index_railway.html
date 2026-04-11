@@ -363,7 +363,7 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg-primary);color
 
 <script>
 const WS_URL = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`;
-const TOP_N = 8;
+const TOP_N = 3;
 let ws = null;
 let reconnectTimer = null;
 let lastPrice = 0;
@@ -379,6 +379,10 @@ let lastBarOpen = 0;
 let lastBarHigh = 0;
 let lastBarLow = 0;
 let chartBarTimes = new Set();
+let predOverlay = null;
+let currentPredictions = [];
+let currentAtr = 20;
+let lastAtr = 20;
 
 function connect() {
   ws = new WebSocket(WS_URL);
@@ -425,7 +429,7 @@ function initChart() {
     grid: { vertLines: { color: 'rgba(255,255,255,0.05)' }, horzLines: { color: 'rgba(255,255,255,0.05)' } },
     crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
     rightPriceScale: { borderColor: 'rgba(255,255,255,0.1)', scaleMargins: { top: 0.05, bottom: 0.25 } },
-    timeScale: { borderColor: 'rgba(255,255,255,0.1)', timeVisible: true, secondsVisible: false },
+    timeScale: { borderColor: 'rgba(255,255,255,0.1)', timeVisible: true, secondsVisible: false, rightOffset: 15 },
   });
   
   candleSeries = chart.addCandlestickSeries({
@@ -449,6 +453,16 @@ function initChart() {
     const newRect = entries[0].contentRect;
     chart.applyOptions({ width: newRect.width, height: newRect.height });
   }).observe(container);
+
+  // Prediction overlay (SVG for TP/SL dots projected into the future)
+  container.style.position = 'relative';
+  predOverlay = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  predOverlay.id = 'predOverlay';
+  predOverlay.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:5;overflow:visible';
+  container.appendChild(predOverlay);
+
+  // Re-render predictions on scroll/zoom
+  chart.timeScale().subscribeVisibleLogicalRangeChange(() => renderPredictions());
 }
 
 function updateChartHistory(bars) {
@@ -504,6 +518,118 @@ function updateChartTick(s) {
   } catch(e) { console.error("Tick update error:", e); }
 }
 
+// ═══ PREDICTIONS (TP/SL dots projected into the future) ═══
+function updatePredictions(signals, atr) {
+  currentPredictions = signals;
+  currentAtr = atr || 20;
+  renderPredictions();
+}
+
+function renderPredictions() {
+  if (!predOverlay || !chart || !candleSeries || !lastBarTime) return;
+  predOverlay.innerHTML = '';
+
+  const barSecs = 300; // 5-min bars
+  const movePerBar = Math.max(currentAtr * 0.35, 2);
+
+  currentPredictions.forEach(sig => {
+    const tpPrice = sig.tp1;
+    const slPrice = sig.invalidation || sig.sl;
+    const entryPrice = sig.entry;
+    if (!tpPrice || !slPrice || !entryPrice) return;
+
+    const tpDist = Math.abs(tpPrice - entryPrice);
+    const slDist = Math.abs(slPrice - entryPrice);
+
+    const tpBars = Math.max(3, Math.ceil(tpDist / movePerBar));
+    const slBars = Math.max(2, Math.ceil(slDist / movePerBar));
+
+    const originTime = sig.origin_time || lastBarTime;
+
+    // Entry coordinates (origin point)
+    const eX = chart.timeScale().timeToCoordinate(originTime);
+    const eY = candleSeries.priceToCoordinate(entryPrice);
+    if (eX == null || eY == null) return;
+
+    // ── TP prediction (blue/cyan) ──
+    const tpTime = originTime + tpBars * barSecs;
+    const tpX = chart.timeScale().timeToCoordinate(tpTime);
+    const tpY = candleSeries.priceToCoordinate(tpPrice);
+
+    if (tpX != null && tpY != null) {
+      // Dashed line from entry → TP
+      const line = svgEl('line', {
+        x1: eX, y1: eY, x2: tpX, y2: tpY,
+        stroke: '#06b6d4', 'stroke-width': 1,
+        'stroke-dasharray': '4,3', opacity: 0.4
+      });
+      predOverlay.appendChild(line);
+
+      // Glow behind dot
+      predOverlay.appendChild(svgEl('circle', {
+        cx: tpX, cy: tpY, r: 8,
+        fill: '#06b6d4', opacity: 0.15
+      }));
+      // TP dot
+      predOverlay.appendChild(svgEl('circle', {
+        cx: tpX, cy: tpY, r: 5,
+        fill: '#06b6d4', opacity: 0.85
+      }));
+      // Price label
+      const label = svgEl('text', {
+        x: tpX + 9, y: tpY + 3,
+        fill: '#06b6d4', 'font-size': 9,
+        'font-family': 'JetBrains Mono, monospace', opacity: 0.9
+      });
+      label.textContent = tpPrice.toFixed(0);
+      predOverlay.appendChild(label);
+    }
+
+    // ── SL prediction (red) ──
+    const slTime = originTime + slBars * barSecs;
+    const slX = chart.timeScale().timeToCoordinate(slTime);
+    const slY = candleSeries.priceToCoordinate(slPrice);
+
+    if (slX != null && slY != null) {
+      // Dashed line from entry → SL
+      predOverlay.appendChild(svgEl('line', {
+        x1: eX, y1: eY, x2: slX, y2: slY,
+        stroke: '#ef4444', 'stroke-width': 1,
+        'stroke-dasharray': '4,3', opacity: 0.35
+      }));
+      // SL dot
+      predOverlay.appendChild(svgEl('circle', {
+        cx: slX, cy: slY, r: 4,
+        fill: '#ef4444', opacity: 0.7
+      }));
+      // Price label
+      const slLabel = svgEl('text', {
+        x: slX + 8, y: slY + 3,
+        fill: '#ef4444', 'font-size': 9,
+        'font-family': 'JetBrains Mono, monospace', opacity: 0.8
+      });
+      slLabel.textContent = slPrice.toFixed(0);
+      predOverlay.appendChild(slLabel);
+    }
+
+    // ── Small name label near entry ──
+    const nameLabel = svgEl('text', {
+      x: eX + 4, y: eY - 6,
+      fill: sig.direction === 'long' ? '#10b981' : '#ef4444',
+      'font-size': 8, 'font-family': 'Inter, sans-serif',
+      'font-weight': 600, opacity: 0.6
+    });
+    nameLabel.textContent = sig.name;
+    predOverlay.appendChild(nameLabel);
+  });
+}
+
+function svgEl(tag, attrs) {
+  const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+  return el;
+}
+
 // ═══ STATE ═══
 function updateState(s) {
   if (!s) return;
@@ -517,6 +643,7 @@ function updateState(s) {
     lastPrice = s.price;
     updateChartTick(s);
   }
+  if (s.atr) lastAtr = s.atr;
   txt('statAtr', s.atr?.toFixed(1) || '—');
   txt('statVwap', s.vwap?.toFixed(2) || '—');
   txt('statEma20', s.ema20?.toFixed(2) || '—');
@@ -615,7 +742,8 @@ function updateSignals(signals, resolved) {
     };
 
     top.forEach(processActive);
-    rest.forEach(processActive);
+    // Rest → prediction dots on chart (no price lines)
+    updatePredictions(rest, lastAtr);
 
     // ── RESOLVED signals: marker only (no price lines), at origin candle ──
     resolved.forEach(sig => {
@@ -647,14 +775,21 @@ function updateSignals(signals, resolved) {
     top.forEach((sig, i) => topEl.appendChild(createHeroCard(sig, i + 1)));
   }
 
-  // REST toggle + cards
+  // REST toggle — show prediction count (dots are on chart)
   const toggle = $('restToggle');
   if (rest.length > 0) {
     toggle.style.display = 'flex';
-    txt('restCount', rest.length);
+    const rl = rest.filter(s => s.direction === 'long').length;
+    const rs = rest.filter(s => s.direction === 'short').length;
+    txt('restCount', `${rest.length} on chart`);
     const miniGrid = $('miniGrid');
-    miniGrid.innerHTML = '';
-    rest.forEach(sig => miniGrid.appendChild(createMiniCard(sig)));
+    miniGrid.innerHTML = `<div style="padding:12px;color:var(--text-muted);font-size:.8rem;text-align:center">
+      📍 ${rest.length} predictions shown as dots on chart
+      <span style="color:var(--long)">▲${rl} long</span> ·
+      <span style="color:var(--short)">▼${rs} short</span><br>
+      <span style="color:#06b6d4">● TP targets</span> ·
+      <span style="color:#ef4444">● SL levels</span>
+    </div>`;
   } else {
     toggle.style.display = 'none';
   }

@@ -14,11 +14,14 @@ from __future__ import annotations
 
 import compat  # noqa: F401 — patches dataclass for Python 3.9
 
+import logging
 import math
 import time
 from collections import defaultdict
 from datetime import datetime
 from typing import Any
+
+log = logging.getLogger("signal_dash")
 
 import pandas as pd
 
@@ -109,9 +112,11 @@ class SignalEngine:
         # Get ALL candidates (no champion filter, no director gate)
         try:
             candidates = list(self.composite.generate(ctx))
-        except Exception:
+        except Exception as e:
+            log.warning("composite.generate() error: %s", e)
             return []
 
+        log.info("Raw candidates: %d | bars: %d", len(candidates), len(bars_df))
         if not candidates:
             return []
 
@@ -275,7 +280,10 @@ class SignalEngine:
                     sig["confidence_pct"] = min(100, int(sig["confidence_pct"] * 1.3 + 10))
 
         # Odrzucamy drastycznie osłabione sygnały by odśmiecić wizjonera
+        pre_filter = len(enriched)
         enriched = [s for s in enriched if s["confidence_pct"] >= 50]
+        if pre_filter > 0:
+            log.info("Confidence filter: %d -> %d (dropped %d)", pre_filter, len(enriched), pre_filter - len(enriched))
 
         # Sort by confidence (highest first)
         enriched.sort(key=lambda s: s["confidence_pct"], reverse=True)

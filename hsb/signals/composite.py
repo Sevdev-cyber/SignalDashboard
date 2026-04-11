@@ -812,6 +812,11 @@ class CompositeGenerator:
     # Candidate construction with multi-target levels
     # ------------------------------------------------------------------
 
+    # Retrace entry: zamiast market order na bar close, ustawiamy limit
+    # order X pts w "złą" stronę. Dane z event study (3900+ sygnałów)
+    # pokazują że 76-86% sygnałów daje retrace >= 3-5 pts przed TP1.
+    _RETRACE_OFFSET_ATR = 0.15  # retrace = 15% ATR (~3-5 pts przy ATR 20-30)
+
     def _make(
         self,
         *,
@@ -826,6 +831,14 @@ class CompositeGenerator:
         source_type: str,
         family: CandidateFamily = CandidateFamily.COMPOSITE,
     ) -> SignalCandidate:
+        # --- Retrace entry adjustment ---
+        atr = self._safe(bars.iloc[-1].get("atr") if len(bars) > 0 else None, 20.0)
+        retrace = atr * self._RETRACE_OFFSET_ATR
+        if direction == Direction.LONG:
+            entry = entry - retrace   # kupuj niżej
+        else:
+            entry = entry + retrace   # sprzedaj wyżej
+
         # Per-signal SL padding (same as _helpers.py)
         _PADDING = {
             "delta_div": 5.0, "delta_accel": 5.0, "exhaustion": 5.0,
@@ -878,6 +891,8 @@ class CompositeGenerator:
                 "bar_index": bar_index,
                 "risk": round(risk, 2),
                 "source_type": source_type,
+                "retrace_offset": round(retrace, 2),
+                "entry_type": "limit",
             },
         )
 

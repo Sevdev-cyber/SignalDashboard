@@ -113,10 +113,39 @@ class SignalDashboardServer:
             self._ws_clients.discard(ws)
             log.info("🌐 WS client disconnected: %s", peer)
 
+    async def _broadcast_split(self, full_payload: dict, all_bars: list):
+        """Send full data to local WS clients, reduced data to relay."""
+        full_msg = self._safe_json(full_payload)
+
+        # Relay gets reduced payload: top 15 signals, last 200 bars, no history
+        if self.relay_url:
+            relay_payload = dict(full_payload)
+            relay_payload["signals"] = full_payload.get("signals", [])[:15]
+            relay_payload["bars"] = all_bars[-200:] if all_bars else []
+            relay_payload["history"] = []
+            relay_payload["resolved"] = full_payload.get("resolved", [])[-20:]
+            relay_msg = self._safe_json(relay_payload)
+            log.info("Relay payload: %d bytes (signals=%d, bars=%d)",
+                     len(relay_msg), len(relay_payload["signals"]), len(relay_payload["bars"]))
+            try:
+                loop = self.loop or asyncio.get_event_loop()
+                loop.run_in_executor(self.executor, self._push_to_relay, relay_msg)
+            except Exception as e:
+                log.error("Relay dispatch error: %s", e)
+
+        # Local WS gets full payload
+        dead = set()
+        for ws in list(self._ws_clients):
+            try:
+                await ws.send(full_msg)
+            except Exception:
+                dead.add(ws)
+        self._ws_clients -= dead
+
     async def _broadcast(self, data: dict):
         """Send data to all connected WebSocket clients AND to the relay."""
         msg = self._safe_json(data)
-        
+
         # ALWAYS push to relay HTTP server (regardless of local WS clients)
         if self.relay_url:
             try:
@@ -137,20 +166,22 @@ class SignalDashboardServer:
     def _push_to_relay(self, payload: str):
         """Push state payload to the remote relay server."""
         try:
+            import ssl
+            ctx = ssl.create_default_context()
             req = urllib.request.Request(self.relay_url, data=payload.encode('utf-8'))
             req.add_header('Content-Type', 'application/json')
             if self.relay_secret:
                 req.add_header('X-Push-Secret', self.relay_secret)
-            
-            with urllib.request.urlopen(req, timeout=3) as response:
+
+            with urllib.request.urlopen(req, timeout=10, context=ctx) as response:
                 if response.status in (200, 201):
-                    log.debug("✅ Relay push OK (%d bytes)", len(payload))
+                    log.info("✅ Relay push OK (%d bytes)", len(payload))
                 else:
-                    log.warning("Relay push failed: %s", response.status)
+                    log.warning("Relay push failed: HTTP %s", response.status)
         except urllib.error.URLError as e:
-            log.error("Relay push failed (URLError): %s", e.reason)
+            log.error("Relay push failed (URLError): reason=%r | %s", e.reason, e)
         except Exception as e:
-            log.error("Relay push failed: %s", e)
+            log.error("Relay push failed: %s: %s", type(e).__name__, e)
 
     # ── TCP Feed (reuses tcp_adapter patterns) ──
 
@@ -285,6 +316,8 @@ class SignalDashboardServer:
         
         # Memory tracking
         now_ts = int(time.time() * 1000)
+        added = 0
+        skipped_dead = 0
         # 1. Update existing or add new
         for s in new_signals:
             matched = False
@@ -298,8 +331,22 @@ class SignalDashboardServer:
                         acts["confidence_pct"] = s["confidence_pct"]
                     matched = True
                     break
-                    
+
             if not matched:
+                # Pre-filter: skip signals that are already dead (TP/SL already hit)
+                price = self.current_price
+                buffer = 1.0
+                dead = False
+                if s["direction"] == "long":
+                    if price <= s["sl"] + buffer or price >= s["tp1"] - buffer:
+                        dead = True
+                else:
+                    if price >= s["sl"] - buffer or price <= s["tp1"] + buffer:
+                        dead = True
+                if dead:
+                    skipped_dead += 1
+                    continue
+
                 s["creation_time"] = now_ts
                 # Remember what bar it originated on
                 s["origin_bar"] = int(self.bar_count)
@@ -307,13 +354,17 @@ class SignalDashboardServer:
                 if "origin_time" not in s:
                     s["origin_time"] = int(time.time())
                 self.active_signals[s["id"]] = s
+                added += 1
+
+        log.info("Active signals: %d (added: %d, skipped dead: %d, engine: %d) | bar=%d | price=%.2f",
+                 len(self.active_signals), added, skipped_dead, len(new_signals), self.bar_count, self.current_price)
 
         state = self.engine.get_market_state(
             self.bars_df,
             current_price=self.current_price,
             bar_delta_pct=self._bar_delta_pct,
         )
-        
+
         # Convert dictionary to descending sorted list for broadcast
         signals_payload = list(self.active_signals.values())
         signals_payload.sort(key=lambda x: x["confidence_pct"], reverse=True)
@@ -324,7 +375,7 @@ class SignalDashboardServer:
         self._latest_signals = signals_payload
         self._latest_zones = zones
 
-        # Extract recent candlestick history for TradingView chart (last 800 bars for FVG context)
+        # Extract recent candlestick history for TradingView chart
         bars_for_chart = []
         if not self.bars_df.empty:
             recent = self.bars_df.tail(800)
@@ -346,17 +397,22 @@ class SignalDashboardServer:
                     "cum_delta": float(row.get("cum_delta", 0.0)),
                 })
 
+        full_payload = {
+            "type": "full_update",
+            "state": state,
+            "signals": signals_payload,
+            "resolved": self.resolved_signals,
+            "zones": zones,
+            "history": self.engine.get_history(),
+            "bars": bars_for_chart,
+        }
+
         # Schedule broadcast on the event loop safely from the TCP thread
         if self.loop:
-            asyncio.run_coroutine_threadsafe(self._broadcast({
-                "type": "full_update",
-                "state": state,
-                "signals": signals_payload,
-                "resolved": self.resolved_signals,
-                "zones": zones,
-                "history": self.engine.get_history(),
-                "bars": bars_for_chart,
-            }), self.loop)
+            asyncio.run_coroutine_threadsafe(
+                self._broadcast_split(full_payload, bars_for_chart),
+                self.loop,
+            )
 
     def _tick_update(self):
         """Broadcast lightweight tick update every 4 seconds."""
