@@ -254,7 +254,7 @@ class SignalDashboardServer:
             if not hasattr(self, '_last_full_broadcast'):
                 self._last_full_broadcast = 0
             
-            if now - self._last_full_broadcast >= 3:
+            if now - self._last_full_broadcast >= 1:
                 self._last_full_broadcast = now
                 self._evaluate_and_broadcast()
 
@@ -274,7 +274,7 @@ class SignalDashboardServer:
 
             # Broadcast tick update every 4 seconds
             now = time.time()
-            if now - self._last_tick_broadcast >= 4:
+            if now - self._last_tick_broadcast >= 1:
                 self._last_tick_broadcast = now
                 self._tick_update()
 
