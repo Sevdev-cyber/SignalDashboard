@@ -482,9 +482,9 @@ function updateChartHistory(bars) {
       unique.forEach(b => chartBarTimes.add(b.time));
   }
   
-  try { 
-      candleSeries.setData(unique); 
-      
+  try {
+      candleSeries.setData(unique);
+
       const cvdData = unique.filter(b => b.cum_delta != null).map(b => ({
           time: b.time,
           value: b.cum_delta
@@ -492,7 +492,9 @@ function updateChartHistory(bars) {
       if (cvdData.length > 0 && cvdSeries) {
           cvdSeries.setData(cvdData);
       }
-      
+
+      // Re-render predictions after chart data loads
+      requestAnimationFrame(() => renderPredictions());
   } catch(e) { console.error("History setData error:", e); }
 }
 
@@ -526,11 +528,15 @@ function updatePredictions(signals, atr) {
 }
 
 function renderPredictions() {
-  if (!predOverlay || !chart || !candleSeries || !lastBarTime) return;
+  if (!predOverlay || !chart || !candleSeries || !lastBarTime) {
+    console.log('[PRED] skip render:', {overlay: !!predOverlay, chart: !!chart, candle: !!candleSeries, lastBar: lastBarTime});
+    return;
+  }
   predOverlay.innerHTML = '';
 
   const barSecs = 300; // 5-min bars
   const movePerBar = Math.max(currentAtr * 0.35, 2);
+  let rendered = 0, skipped = 0;
 
   currentPredictions.forEach(sig => {
     const tpPrice = sig.tp1;
@@ -549,7 +555,7 @@ function renderPredictions() {
     // Entry coordinates (origin point)
     const eX = chart.timeScale().timeToCoordinate(originTime);
     const eY = candleSeries.priceToCoordinate(entryPrice);
-    if (eX == null || eY == null) return;
+    if (eX == null || eY == null) { skipped++; return; }
 
     // ── TP prediction (blue/cyan) ──
     const tpTime = originTime + tpBars * barSecs;
@@ -616,7 +622,9 @@ function renderPredictions() {
     });
     nameLabel.textContent = sig.name;
     predOverlay.appendChild(nameLabel);
+    rendered++;
   });
+  console.log(`[PRED] rendered=${rendered} skipped=${skipped} total=${currentPredictions.length} atr=${currentAtr}`);
 }
 
 function svgEl(tag, attrs) {
@@ -716,7 +724,10 @@ function updateSignals(signals, resolved) {
   }
 
   // ALL signals → prediction dots on chart (SVG overlay)
+  // Use RAF to ensure chart has rendered coordinates before placing dots
   updatePredictions(signals, lastAtr);
+  requestAnimationFrame(() => renderPredictions());
+  setTimeout(() => renderPredictions(), 200);
 
   // All signals shown as prediction dots — compact summary instead of cards
   const topEl = $('topSignals');
