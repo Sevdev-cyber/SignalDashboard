@@ -67,6 +67,7 @@ class SignalDashboardServer:
         self._bar_delta_raw = 0        # buy_vol - sell_vol (Bookmap style)
         self._session_cvd = 0          # session cumulative delta
         self._bar_trade_value = 0.0    # sum(price * vol) for tick-level VWAP
+        self._warmup_done = False      # prevent re-processing warmup ticks on reconnect
 
         # WebSocket clients
         self._ws_clients: set = set()
@@ -200,13 +201,21 @@ class SignalDashboardServer:
         adapter = TickStreamerAdapter(host=self.tcp_host, port=self.tcp_port, dry_run=True)
 
         def on_warmup():
+            # Always update bars (reconnect may have newer data)
             self.bars_df = warmup_bars_to_df(adapter.warmup_bars)
 
-            # Apply real tick-based delta if warmup ticks available (Bookmap-grade accuracy)
-            if adapter.warmup_ticks:
+            # Apply real tick-based delta ONLY on first warmup in this session
+            # On reconnect, skip tick processing (already done, saves 50+ seconds)
+            if not self._warmup_done and adapter.warmup_ticks:
                 log.info("🎯 Processing %d warmup ticks for real delta/CVD/VWAP...", len(adapter.warmup_ticks))
                 self.bars_df = apply_tick_deltas(self.bars_df, adapter.warmup_ticks)
                 log.info("✅ Tick-based delta applied to %d bars", len(self.bars_df))
+                self._warmup_done = True
+            elif self._warmup_done:
+                log.info("⏭️ Skipping tick warmup (already processed this session)")
+
+            # Clear active signals on reconnect (prevent accumulation)
+            self.active_signals.clear()
 
             self.bar_count = len(self.bars_df)
             if not self.bars_df.empty:
