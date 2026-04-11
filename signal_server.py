@@ -317,56 +317,42 @@ class SignalDashboardServer:
             bar_delta_pct=self._bar_delta_pct,
             current_price=self.current_price,
         )
-        
-        # Memory tracking
+
+        # REPLACE active signals each evaluation (prevent accumulation 44→84→164→234)
+        self.active_signals.clear()
+
         now_ts = int(time.time() * 1000)
         added = 0
         skipped_dead = 0
-        # 1. Update existing or add new
+        price = self.current_price
+        atr = float(self.bars_df.iloc[-1].get("atr", 20)) if not self.bars_df.empty else 20
+
         for s in new_signals:
-            matched = False
-            for sid, acts in self.active_signals.items():
-                # Matching identical setups by their stable logical ID from the generator
-                if acts["id"] == s["id"]:
-                    acts["entry"] = s["entry"]
-                    acts["sl"] = s["sl"]
-                    acts["tp1"] = s["tp1"]
-                    if s["confidence_pct"] > acts["confidence_pct"]:
-                        acts["confidence_pct"] = s["confidence_pct"]
-                    matched = True
-                    break
+            # Pre-filter 1: skip signals where entry is too far from current price (>1.5 ATR)
+            entry_dist = abs(s["entry"] - price)
+            if entry_dist > atr * 1.5:
+                skipped_dead += 1
+                continue
 
-            if not matched:
-                price = self.current_price
-                atr = float(self.bars_df.iloc[-1].get("atr", 20)) if not self.bars_df.empty else 20
+            # Pre-filter 2: skip signals where TP/SL already hit
+            buffer = 1.0
+            dead = False
+            if s["direction"] == "long":
+                if price <= s["sl"] + buffer or price >= s["tp1"] - buffer:
+                    dead = True
+            else:
+                if price >= s["sl"] - buffer or price <= s["tp1"] + buffer:
+                    dead = True
+            if dead:
+                skipped_dead += 1
+                continue
 
-                # Pre-filter 1: skip signals where entry is too far from current price (>1.5 ATR)
-                entry_dist = abs(s["entry"] - price)
-                if entry_dist > atr * 1.5:
-                    skipped_dead += 1
-                    continue
-
-                # Pre-filter 2: skip signals where TP/SL already hit
-                buffer = 1.0
-                dead = False
-                if s["direction"] == "long":
-                    if price <= s["sl"] + buffer or price >= s["tp1"] - buffer:
-                        dead = True
-                else:
-                    if price >= s["sl"] - buffer or price <= s["tp1"] + buffer:
-                        dead = True
-                if dead:
-                    skipped_dead += 1
-                    continue
-
-                s["creation_time"] = now_ts
-                # Remember what bar it originated on
-                s["origin_bar"] = int(self.bar_count)
-                # Keep the true historical origin_time provided by the engine
-                if "origin_time" not in s:
-                    s["origin_time"] = int(time.time())
-                self.active_signals[s["id"]] = s
-                added += 1
+            s["creation_time"] = now_ts
+            s["origin_bar"] = int(self.bar_count)
+            if "origin_time" not in s:
+                s["origin_time"] = int(time.time())
+            self.active_signals[s["id"]] = s
+            added += 1
 
         log.info("Active signals: %d (added: %d, skipped dead: %d, engine: %d) | bar=%d | price=%.2f",
                  len(self.active_signals), added, skipped_dead, len(new_signals), self.bar_count, self.current_price)
@@ -427,7 +413,7 @@ class SignalDashboardServer:
             )
 
     def _tick_update(self):
-        """Broadcast lightweight tick update every 4 seconds."""
+        """Broadcast lightweight tick update every second."""
         if not self._latest_state:
             return
 
@@ -439,21 +425,39 @@ class SignalDashboardServer:
         )
         self._latest_state = state
 
-        # Always send current active signals (may have been pruned by TP/SL)
         signals_payload = list(self.active_signals.values())
         signals_payload.sort(key=lambda x: x["confidence_pct"], reverse=True)
         self._latest_signals = signals_payload
 
-        # Tick updates go to local WS only (no relay — relay gets data on bar close)
+        # Send tick updates to BOTH local WS and relay (so Railway dashboard updates live)
+        tick_payload = {
+            "type": "tick_update",
+            "state": state,
+            "signals": signals_payload[:15],  # limit for relay bandwidth
+            "resolved": self.resolved_signals[-10:],
+            "zones": self._latest_zones,
+        }
         if self.loop:
-            msg = self._safe_json({
-                "type": "tick_update",
-                "state": state,
-                "signals": signals_payload,
-                "resolved": self.resolved_signals,
-                "zones": self._latest_zones,
-            })
+            msg = self._safe_json(tick_payload)
             asyncio.run_coroutine_threadsafe(self._ws_only(msg), self.loop)
+            # Also push to relay every 2s (lightweight: no bars, no history)
+            now = time.time()
+            if not hasattr(self, '_last_relay_tick'):
+                self._last_relay_tick = 0
+            if now - self._last_relay_tick >= 2:
+                self._last_relay_tick = now
+                asyncio.run_coroutine_threadsafe(self._relay_push(tick_payload), self.loop)
+
+    async def _relay_push(self, payload: dict):
+        """Push lightweight payload to relay (async, non-blocking)."""
+        if not self.relay_url:
+            return
+        try:
+            msg = self._safe_json(payload)
+            loop = self.loop or asyncio.get_event_loop()
+            loop.run_in_executor(self.executor, self._push_to_relay, msg)
+        except Exception as e:
+            log.debug("Relay tick push error: %s", e)
 
     async def _ws_only(self, msg: str):
         """Send to local WebSocket clients only (no relay)."""
