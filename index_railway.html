@@ -579,6 +579,19 @@ function renderPredSVG() {
   const barSecs = 300;
   const movePerBar = Math.max(predAtr * 0.35, 2);
 
+  // Calculate pixels-per-bar for future time extrapolation
+  // Use two known bar times to find the pixel spacing
+  var pxPerBar = 0;
+  var lastBarX = null;
+  if (lastBarTime) {
+    lastBarX = chart.timeScale().timeToCoordinate(lastBarTime);
+    const prevTime = lastBarTime - barSecs;
+    const prevX = chart.timeScale().timeToCoordinate(prevTime);
+    if (lastBarX != null && prevX != null) {
+      pxPerBar = lastBarX - prevX;
+    }
+  }
+
   predSignals.forEach((sig, idx) => {
     const tp = sig.tp1;
     const sl = sig.invalidation || sig.sl;
@@ -595,18 +608,30 @@ function renderPredSVG() {
     const oY = candleSeries.priceToCoordinate(entry);
     if (oX == null || oY == null) return;
 
+    // Helper: get X for a future time, extrapolating if timeToCoordinate returns null
+    function futureX(t) {
+      const x = chart.timeScale().timeToCoordinate(t);
+      if (x != null) return x;
+      // Extrapolate from last known bar
+      if (lastBarX != null && pxPerBar > 0) {
+        const barsAhead = (t - lastBarTime) / barSecs;
+        return lastBarX + barsAhead * pxPerBar;
+      }
+      return null;
+    }
+
     // TP position — project into future from origin
     const tpDist = Math.abs(tp - entry);
     const tpBars = Math.max(3, Math.ceil(tpDist / movePerBar));
     const tpTime = originTime + tpBars * barSecs;
-    const tpX = chart.timeScale().timeToCoordinate(tpTime);
+    const tpX = futureX(tpTime);
     const tpY = candleSeries.priceToCoordinate(tp);
 
     // SL position — project into future from origin
     const slDist = Math.abs(sl - entry);
     const slBars = Math.max(2, Math.ceil(slDist / movePerBar));
     const slTime = originTime + slBars * barSecs;
-    const slX = chart.timeScale().timeToCoordinate(slTime);
+    const slX = futureX(slTime);
     const slY = candleSeries.priceToCoordinate(sl);
 
     // ── Origin dot (entry point on candle) ──
