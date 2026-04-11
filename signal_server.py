@@ -213,9 +213,6 @@ class SignalDashboardServer:
             elif self._warmup_done:
                 log.info("⏭️ Skipping tick warmup (already processed this session)")
 
-            # Clear active signals on reconnect (prevent accumulation)
-            self.active_signals.clear()
-
             self.bar_count = len(self.bars_df)
             if not self.bars_df.empty:
                 self.current_price = float(self.bars_df.iloc[-1]["close"])
@@ -318,15 +315,14 @@ class SignalDashboardServer:
             current_price=self.current_price,
         )
 
-        # REPLACE active signals each evaluation (prevent accumulation 44→84→164→234)
-        self.active_signals.clear()
-
         now_ts = int(time.time() * 1000)
         added = 0
         skipped_dead = 0
         price = self.current_price
         atr = float(self.bars_df.iloc[-1].get("atr", 20)) if not self.bars_df.empty else 20
 
+        # Build new signal set (replace entirely to prevent accumulation)
+        new_active = {}
         for s in new_signals:
             # Pre-filter 1: skip signals where entry is too far from current price (>1.5 ATR)
             entry_dist = abs(s["entry"] - price)
@@ -347,12 +343,18 @@ class SignalDashboardServer:
                 skipped_dead += 1
                 continue
 
-            s["creation_time"] = now_ts
+            # Preserve creation_time from previous cycle if same signal
+            if s["id"] in self.active_signals:
+                s["creation_time"] = self.active_signals[s["id"]].get("creation_time", now_ts)
+            else:
+                s["creation_time"] = now_ts
             s["origin_bar"] = int(self.bar_count)
             if "origin_time" not in s:
                 s["origin_time"] = int(time.time())
-            self.active_signals[s["id"]] = s
+            new_active[s["id"]] = s
             added += 1
+
+        self.active_signals = new_active
 
         log.info("Active signals: %d (added: %d, skipped dead: %d, engine: %d) | bar=%d | price=%.2f",
                  len(self.active_signals), added, skipped_dead, len(new_signals), self.bar_count, self.current_price)
