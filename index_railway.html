@@ -379,9 +379,6 @@ let lastBarOpen = 0;
 let lastBarHigh = 0;
 let lastBarLow = 0;
 let chartBarTimes = new Set();
-let predOverlay = null;
-let currentPredictions = [];
-let currentAtr = 20;
 let lastAtr = 20;
 
 function connect() {
@@ -454,23 +451,6 @@ function initChart() {
     chart.applyOptions({ width: newRect.width, height: newRect.height });
   }).observe(container);
 
-  // Prediction overlay (SVG for TP/SL dots projected into the future)
-  container.style.position = 'relative';
-  predOverlay = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-  predOverlay.id = 'predOverlay';
-  predOverlay.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:5;overflow:visible';
-  container.appendChild(predOverlay);
-
-  // Re-render predictions on ANY chart interaction (horizontal + vertical)
-  chart.timeScale().subscribeVisibleLogicalRangeChange(() => renderPredictions());
-  let predThrottle = 0;
-  chart.subscribeCrosshairMove(() => {
-    const now = Date.now();
-    if (now - predThrottle > 80) {
-      predThrottle = now;
-      renderPredictions();
-    }
-  });
 }
 
 function updateChartHistory(bars) {
@@ -501,8 +481,7 @@ function updateChartHistory(bars) {
           cvdSeries.setData(cvdData);
       }
 
-      // Re-render predictions after chart data loads
-      requestAnimationFrame(() => renderPredictions());
+      // Price lines auto-scale, no re-render needed
   } catch(e) { console.error("History setData error:", e); }
 }
 
@@ -528,112 +507,78 @@ function updateChartTick(s) {
   } catch(e) { console.error("Tick update error:", e); }
 }
 
-// ═══ PREDICTIONS (TP/SL dots projected into the future) ═══
+// ═══ PREDICTIONS (TP/SL as native price lines — always scale correctly) ═══
+var predLines = [];
+
 function updatePredictions(signals, atr) {
-  currentPredictions = signals;
-  currentAtr = atr || 20;
-  renderPredictions();
-}
+  console.log('[PRED] called, candleSeries:', !!candleSeries, 'signals:', signals?.length);
+  if (!candleSeries) return;
 
-function renderPredictions() {
-  if (!predOverlay || !chart || !candleSeries || !lastBarTime) {
-    console.log('[PRED] skip render:', {overlay: !!predOverlay, chart: !!chart, candle: !!candleSeries, lastBar: lastBarTime});
-    return;
-  }
-  predOverlay.innerHTML = '';
+  // Remove old prediction lines
+  predLines.forEach(l => { try { candleSeries.removePriceLine(l); } catch(e){} });
+  predLines = [];
 
-  const barSecs = 300; // 5-min bars
-  const movePerBar = Math.max(currentAtr * 0.35, 2);
-  let rendered = 0, skipped = 0;
+  if (!signals || signals.length === 0) return;
 
-  // Current price Y as anchor
-  const priceY = candleSeries.priceToCoordinate(lastPrice);
-  const nowX = chart.timeScale().timeToCoordinate(lastBarTime);
-  if (nowX == null || priceY == null) { console.log('[PRED] nowX/priceY null'); return; }
+  // Deduplicate by rounding TP/SL to nearest 0.5 to avoid overlapping lines
+  const tpSeen = new Set();
+  const slSeen = new Set();
 
-  // Sort: highest confidence first, spread across future time slots
-  const sorted = [...currentPredictions].sort((a,b) => (b.confidence_pct||0) - (a.confidence_pct||0));
-  const totalSlots = sorted.length;
+  // Sort by confidence
+  const sorted = [...signals].sort((a,b) => (b.confidence_pct||0) - (a.confidence_pct||0));
 
   sorted.forEach((sig, idx) => {
-    const tpPrice = sig.tp1;
-    const slPrice = sig.invalidation || sig.sl;
-    const entryPrice = sig.entry;
-    if (!tpPrice || !slPrice || !entryPrice) return;
-
-    // Spread signals across future: slot 1-N bars ahead
-    const slot = idx + 2; // start 2 bars into future
-    const futureTime = lastBarTime + slot * barSecs;
-    const futureX = chart.timeScale().timeToCoordinate(futureTime);
-    if (futureX == null) { skipped++; return; }
-
-    const tpY = candleSeries.priceToCoordinate(tpPrice);
-    const slY = candleSeries.priceToCoordinate(slPrice);
-    const eY = candleSeries.priceToCoordinate(entryPrice);
-    if (eY == null) { skipped++; return; }
+    const tp = sig.tp1;
+    const sl = sig.invalidation || sig.sl;
+    if (!tp || !sl) return;
 
     const isLong = sig.direction === 'long';
-    const sigColor = isLong ? '#10b981' : '#ef4444';
+    const conf = sig.confidence_pct || 50;
+    const isTop = idx < 3;
 
-    // ── Dashed line: current price → entry at future slot ──
-    predOverlay.appendChild(svgEl('line', {
-      x1: nowX, y1: priceY, x2: futureX, y2: eY,
-      stroke: sigColor, 'stroke-width': 0.6,
-      'stroke-dasharray': '2,3', opacity: 0.2
-    }));
-
-    // ── Entry diamond at future slot ──
-    predOverlay.appendChild(svgEl('circle', {
-      cx: futureX, cy: eY, r: 2.5,
-      fill: sigColor, opacity: 0.5
-    }));
-
-    // ── TP dot (above/below entry) ──
-    if (tpY != null) {
-      predOverlay.appendChild(svgEl('line', {
-        x1: futureX, y1: eY, x2: futureX, y2: tpY,
-        stroke: '#06b6d4', 'stroke-width': 1,
-        'stroke-dasharray': '2,2', opacity: 0.3
-      }));
-      predOverlay.appendChild(svgEl('circle', {
-        cx: futureX, cy: tpY, r: 3.5,
-        fill: '#06b6d4', opacity: 0.65
+    // TP line (cyan) — deduplicate by rounded price
+    const tpKey = Math.round(tp * 2) / 2;
+    if (!tpSeen.has(tpKey)) {
+      tpSeen.add(tpKey);
+      const tpLabel = isTop ? `TP ${sig.name} ${tp.toFixed(0)}` : '';
+      predLines.push(candleSeries.createPriceLine({
+        price: tp,
+        color: 'rgba(6, 182, 212, ' + (isTop ? '0.5' : '0.2') + ')',
+        lineWidth: isTop ? 1 : 1,
+        lineStyle: 2, // dashed
+        axisLabelVisible: isTop,
+        title: tpLabel,
       }));
     }
 
-    // ── SL dot (opposite side) ──
-    if (slY != null) {
-      predOverlay.appendChild(svgEl('line', {
-        x1: futureX, y1: eY, x2: futureX, y2: slY,
-        stroke: '#ef4444', 'stroke-width': 0.8,
-        'stroke-dasharray': '2,2', opacity: 0.2
-      }));
-      predOverlay.appendChild(svgEl('circle', {
-        cx: futureX, cy: slY, r: 2.5,
-        fill: '#ef4444', opacity: 0.45
+    // SL line (red) — deduplicate
+    const slKey = Math.round(sl * 2) / 2;
+    if (!slSeen.has(slKey)) {
+      slSeen.add(slKey);
+      const slLabel = isTop ? `SL ${sig.name} ${sl.toFixed(0)}` : '';
+      predLines.push(candleSeries.createPriceLine({
+        price: sl,
+        color: 'rgba(239, 68, 68, ' + (isTop ? '0.4' : '0.15') + ')',
+        lineWidth: 1,
+        lineStyle: 2,
+        axisLabelVisible: isTop,
+        title: slLabel,
       }));
     }
 
-    // ── Tiny name (only for top 5) ──
-    if (idx < 5) {
-      const nameLabel = svgEl('text', {
-        x: futureX + 5, y: eY - 3,
-        fill: sigColor, 'font-size': 6,
-        'font-family': 'Inter, sans-serif',
-        'font-weight': 500, opacity: 0.3
-      });
-      nameLabel.textContent = sig.name;
-      predOverlay.appendChild(nameLabel);
+    // Entry line (green/red, only top 3)
+    if (isTop) {
+      predLines.push(candleSeries.createPriceLine({
+        price: sig.entry,
+        color: isLong ? 'rgba(16, 185, 129, 0.6)' : 'rgba(239, 68, 68, 0.6)',
+        lineWidth: 2,
+        lineStyle: 0, // solid
+        axisLabelVisible: true,
+        title: `${isLong ? '▲' : '▼'} ${sig.name} ${conf}%`,
+      }));
     }
-    rendered++;
   });
-  console.log(`[PRED] rendered=${rendered} skipped=${skipped} total=${currentPredictions.length} atr=${currentAtr}`);
-}
-
-function svgEl(tag, attrs) {
-  const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
-  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
-  return el;
+  console.log(`[PRED] ${predLines.length} price lines from ${signals.length} signals`);
 }
 
 // ═══ STATE ═══
@@ -726,11 +671,8 @@ function updateSignals(signals, resolved) {
     try { candleSeries.setMarkers([]); } catch(e) {}
   }
 
-  // ALL signals → prediction dots on chart (SVG overlay)
-  // Use RAF to ensure chart has rendered coordinates before placing dots
+  // ALL signals → prediction price lines on chart
   updatePredictions(signals, lastAtr);
-  requestAnimationFrame(() => renderPredictions());
-  setTimeout(() => renderPredictions(), 200);
 
   // All signals shown as prediction dots — compact summary instead of cards
   const topEl = $('topSignals');
