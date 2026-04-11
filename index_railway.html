@@ -542,7 +542,7 @@ function updatePredictions(signals, atr) {
       tpSeen.add(tpKey);
       predLines.push(candleSeries.createPriceLine({
         price: tp,
-        color: isTop ? 'rgba(6, 182, 212, 0.6)' : 'rgba(6, 182, 212, 0.35)',
+        color: isTop ? 'rgba(6, 182, 212, 0.7)' : 'rgba(6, 182, 212, 0.6)',
         lineWidth: 1,
         lineStyle: 2, // dashed
         axisLabelVisible: true,
@@ -556,7 +556,7 @@ function updatePredictions(signals, atr) {
       slSeen.add(slKey);
       predLines.push(candleSeries.createPriceLine({
         price: sl,
-        color: isTop ? 'rgba(239, 68, 68, 0.5)' : 'rgba(239, 68, 68, 0.3)',
+        color: isTop ? 'rgba(239, 68, 68, 0.6)' : 'rgba(239, 68, 68, 0.6)',
         lineWidth: 1,
         lineStyle: 2,
         axisLabelVisible: true,
