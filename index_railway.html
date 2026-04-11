@@ -540,14 +540,13 @@ function updatePredictions(signals, atr) {
     const tpKey = Math.round(tp * 2) / 2;
     if (!tpSeen.has(tpKey)) {
       tpSeen.add(tpKey);
-      const tpLabel = isTop ? `TP ${sig.name} ${tp.toFixed(0)}` : '';
       predLines.push(candleSeries.createPriceLine({
         price: tp,
-        color: 'rgba(6, 182, 212, ' + (isTop ? '0.5' : '0.2') + ')',
-        lineWidth: isTop ? 1 : 1,
+        color: isTop ? 'rgba(6, 182, 212, 0.6)' : 'rgba(6, 182, 212, 0.35)',
+        lineWidth: 1,
         lineStyle: 2, // dashed
-        axisLabelVisible: isTop,
-        title: tpLabel,
+        axisLabelVisible: true,
+        title: isTop ? `TP ${sig.name}` : `· ${tp.toFixed(0)}`,
       }));
     }
 
@@ -555,14 +554,13 @@ function updatePredictions(signals, atr) {
     const slKey = Math.round(sl * 2) / 2;
     if (!slSeen.has(slKey)) {
       slSeen.add(slKey);
-      const slLabel = isTop ? `SL ${sig.name} ${sl.toFixed(0)}` : '';
       predLines.push(candleSeries.createPriceLine({
         price: sl,
-        color: 'rgba(239, 68, 68, ' + (isTop ? '0.4' : '0.15') + ')',
+        color: isTop ? 'rgba(239, 68, 68, 0.5)' : 'rgba(239, 68, 68, 0.3)',
         lineWidth: 1,
         lineStyle: 2,
-        axisLabelVisible: isTop,
-        title: slLabel,
+        axisLabelVisible: true,
+        title: isTop ? `SL ${sig.name}` : `· ${sl.toFixed(0)}`,
       }));
     }
 
@@ -570,7 +568,7 @@ function updatePredictions(signals, atr) {
     if (isTop) {
       predLines.push(candleSeries.createPriceLine({
         price: sig.entry,
-        color: isLong ? 'rgba(16, 185, 129, 0.6)' : 'rgba(239, 68, 68, 0.6)',
+        color: isLong ? 'rgba(16, 185, 129, 0.7)' : 'rgba(239, 68, 68, 0.7)',
         lineWidth: 2,
         lineStyle: 0, // solid
         axisLabelVisible: true,
