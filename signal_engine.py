@@ -186,13 +186,15 @@ class SignalEngine:
             raw_conf = cand.score * regime_mult * time_mult * day_mult * delta_mult
             confidence_pct = min(100, max(0, int(raw_conf * 100 / 0.75)))
 
+            retrace_offset = cand.features.get("retrace_offset", 0) if hasattr(cand, "features") else 0
             enriched.append({
-                "id": f"{source_type}_{int(time.time()*1000)}",
+                "id": cand.id,
                 "name": display_name or "UNKNOWN",
                 "source_type": source_type,
                 "direction": direction,
                 "score": round(cand.score, 3),
                 "confidence_pct": confidence_pct,
+                "origin_time": int(cand.timestamp.timestamp()),
                 "entry": round(cand.entry_price, 2),
                 "sl": round(cand.sl_price, 2),
                 "tp1": round(tp1, 2),
@@ -210,6 +212,8 @@ class SignalEngine:
                 "delta_pct": round(bar_delta_pct, 1),
                 "delta_aligned": delta_mult >= 1.0,
                 "atr": round(atr, 1),
+                "retrace_offset": round(retrace_offset, 2),
+                "entry_type": "limit",
                 "reasons": cand.reasons if hasattr(cand, "reasons") else [],
                 "confluence_count": 0,
                 "confirming_signals": [],
@@ -231,9 +235,9 @@ class SignalEngine:
         ema50_trend = "flat"
         vwap_price = 0.0
         close_price = 0.0
-        if "ema50" in bars_df.columns and len(bars_df) >= 3:
-            ema50_last = bars_df["ema50"].iloc[-1]
-            ema50_prev = bars_df["ema50"].iloc[-3]
+        if "ema_50" in bars_df.columns and len(bars_df) >= 3:
+            ema50_last = bars_df["ema_50"].iloc[-1]
+            ema50_prev = bars_df["ema_50"].iloc[-3]
             if ema50_last < ema50_prev - 1.5:
                 ema50_trend = "down"
             elif ema50_last > ema50_prev + 1.5:
