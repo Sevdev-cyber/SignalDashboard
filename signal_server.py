@@ -60,10 +60,12 @@ class SignalDashboardServer:
         self.current_price = 0.0
         self.bar_count = 0
 
-        # Tick delta tracking
+        # Tick delta tracking (Bookmap style: raw volume, not percentage)
         self._bar_buy_vol = 0
         self._bar_sell_vol = 0
-        self._bar_delta_pct = 0.0
+        self._bar_delta_pct = 0.0      # legacy: still used by engine
+        self._bar_delta_raw = 0        # buy_vol - sell_vol (Bookmap style)
+        self._session_cvd = 0          # session cumulative delta
 
         # WebSocket clients
         self._ws_clients: set = set()
@@ -209,24 +211,27 @@ class SignalDashboardServer:
             if self.bars_df.empty:
                 return
 
-            # Compute actual delta from tick data before appending
+            # Compute actual delta from tick data (Bookmap style: raw contracts)
             total_vol = self._bar_buy_vol + self._bar_sell_vol
             true_delta = self._bar_buy_vol - self._bar_sell_vol
-            
+            self._bar_delta_raw = true_delta
+            self._session_cvd += true_delta
+
             if total_vol > 0:
                 self._bar_delta_pct = (true_delta) / total_vol * 100
-            
+
             self.bars_df = append_bar(self.bars_df, bar, true_delta=true_delta)
             self.bar_count += 1
             last = self.bars_df.iloc[-1]
-            
+
             self._bar_buy_vol = 0
             self._bar_sell_vol = 0
 
             self.current_price = float(last["close"])
-            log.info("BAR %d | C=%.2f | ATR=%.1f | delta=%.0f%%",
+            log.info("BAR %d | C=%.2f | ATR=%.1f | Δ=%+d (buy=%d sell=%d) | CVD=%+d",
                      self.bar_count, self.current_price,
-                     float(last.get("atr", 0)), self._bar_delta_pct)
+                     float(last.get("atr", 0)), true_delta,
+                     self._bar_buy_vol, self._bar_sell_vol, self._session_cvd)
 
             now = time.time()
             if not hasattr(self, '_last_full_broadcast'):
@@ -245,37 +250,8 @@ class SignalDashboardServer:
             elif tick.aggressor == 2:
                 self._bar_sell_vol += tick.size
 
-            # Validate internal memory - resolve signals that hit TP or SL
-            to_remove = []
-            for sid, s in list(self.active_signals.items()):
-                buffer = 1.0  # 1 point (4 MNQ ticks) margin
-                hit = None
-                if s["direction"] == "long":
-                    if self.current_price <= s["sl"] + buffer:
-                        hit = "SL"
-                    elif self.current_price >= s["tp1"] - buffer:
-                        hit = "TP"
-                else: # short
-                    if self.current_price >= s["sl"] - buffer:
-                        hit = "SL"
-                    elif self.current_price <= s["tp1"] + buffer:
-                        hit = "TP"
-                if hit:
-                    log.info("🗑️ Signal RESOLVED [%s] %s %s @ %.2f → hit %s (price=%.2f)",
-                             s["name"], s["direction"], s["id"][:8], s["entry"], hit, self.current_price)
-                    resolved = dict(s)
-                    resolved["hit"] = hit
-                    resolved["hit_price"] = round(self.current_price, 2)
-                    resolved["hit_time"] = int(time.time())
-                    self.resolved_signals.append(resolved)
-                    to_remove.append(sid)
-
-            # Keep last 100 resolved signals for chart history
-            if len(self.resolved_signals) > 100:
-                self.resolved_signals = self.resolved_signals[-100:]
-
-            for r in to_remove:
-                del self.active_signals[r]
+            # TP/SL resolve disabled — keep all signals visible for observation
+            # TODO: re-enable when ready
 
             # Broadcast tick update every 4 seconds
             now = time.time()

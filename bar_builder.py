@@ -42,8 +42,12 @@ def enrich_bars(df: pd.DataFrame) -> pd.DataFrame:
     ], axis=1).max(axis=1)
     frame["atr"] = tr.rolling(14, min_periods=1).mean()
 
-    # Cumulative delta
-    frame["cum_delta"] = frame["delta"].cumsum()
+    # Cumulative delta — session-based (Bookmap style: resets each trading day)
+    if "datetime" in frame.columns:
+        session_date = pd.to_datetime(frame["datetime"]).dt.date
+        frame["cum_delta"] = frame.groupby(session_date)["delta"].cumsum()
+    else:
+        frame["cum_delta"] = frame["delta"].cumsum()
 
     # VWAP — uses Typical Price = (H+L+C)/3 per industry standard
     typical_price = (frame["high"] + frame["low"] + frame["close"]) / 3

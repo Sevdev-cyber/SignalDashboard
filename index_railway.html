@@ -706,14 +706,17 @@ function updateState(s) {
   txt('statVwap', s.vwap?.toFixed(2) || '—');
   txt('statEma20', s.ema20?.toFixed(2) || '—');
   txt('statEma50', s.ema50?.toFixed(2) || '—');
+  // Delta: raw contracts (Bookmap style), not percentage
   const de = $('statDelta');
-  if (s.delta_pct != null) {
-    de.textContent = (s.delta_pct >= 0 ? '+' : '') + s.delta_pct.toFixed(0) + '%';
-    de.className = 'stat-value ' + (s.delta_pct > 5 ? 'positive' : s.delta_pct < -5 ? 'negative' : '');
+  const dRaw = s.delta_raw != null ? s.delta_raw : null;
+  if (dRaw != null) {
+    de.textContent = (dRaw >= 0 ? '+' : '') + fmtK(dRaw);
+    de.className = 'stat-value ' + (dRaw > 0 ? 'positive' : dRaw < 0 ? 'negative' : '');
   }
+  // CVD: session cumulative delta (Bookmap style)
   const cvd = $('statCvd');
   if (s.cum_delta != null) {
-    cvd.textContent = (s.cum_delta >= 0 ? '+' : '') + s.cum_delta.toFixed(0);
+    cvd.textContent = (s.cum_delta >= 0 ? '+' : '') + fmtK(s.cum_delta);
     cvd.className = 'stat-value ' + (s.cum_delta > 0 ? 'positive' : s.cum_delta < 0 ? 'negative' : '');
   }
 
@@ -781,6 +784,35 @@ function updateSignals(signals, resolved) {
   // ALL signals → prediction price lines on chart
   updatePredictions(signals, lastAtr);
 
+  // ── Origin markers on candles (Bookmap-style: show WHERE signals were created) ──
+  if (candleSeries && signals.length > 0) {
+    const markers = [];
+    signals.forEach(sig => {
+      let ot = sig.origin_time;
+      if (!ot) return;
+      // Snap to nearest known bar time
+      if (!chartBarTimes.has(ot)) {
+        let best = null, bestDiff = Infinity;
+        for (const bt of chartBarTimes) {
+          const d = Math.abs(bt - ot);
+          if (d < bestDiff) { bestDiff = d; best = bt; }
+        }
+        if (best && bestDiff < 600) ot = best; else return;
+      }
+      const isLong = sig.direction === 'long';
+      markers.push({
+        time: ot,
+        position: isLong ? 'belowBar' : 'aboveBar',
+        color: isLong ? '#10b981' : '#ef4444',
+        shape: isLong ? 'arrowUp' : 'arrowDown',
+        text: sig.name.replace(/_/g, ' '),
+      });
+    });
+    // Sort by time (required by lightweight-charts)
+    markers.sort((a, b) => a.time - b.time);
+    try { candleSeries.setMarkers(markers); } catch(e) { console.warn('Markers error:', e); }
+  }
+
   // All signals shown as prediction dots — compact summary instead of cards
   const topEl = $('topSignals');
   if (signals.length === 0) {
@@ -806,14 +838,30 @@ function updateSignals(signals, resolved) {
             </div>
           </div>
         </div>
-        ${bestSig ? `<div style="background:var(--bg-card);border:1px solid var(--border);border-left:3px solid ${bestSig.direction === 'long' ? 'var(--long)' : 'var(--short)'};border-radius:var(--radius);padding:14px 20px;min-width:220px">
-          <div style="font-size:.7rem;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted);margin-bottom:4px">🔥 Best Signal</div>
-          <div style="font-size:1rem;font-weight:800">${bestSig.name} <span style="color:${bestSig.direction === 'long' ? 'var(--long)' : 'var(--short)'};font-size:.8rem">${bestSig.direction.toUpperCase()}</span></div>
+        ${bestSig ? (() => {
+          const bDir = bestSig.direction;
+          const bColor = bDir === 'long' ? 'var(--long)' : 'var(--short)';
+          const originStr = bestSig.origin_time ? new Date(bestSig.origin_time * 1000).toLocaleTimeString() : '—';
+          const entryDist = p ? (bestSig.entry - p).toFixed(2) : '—';
+          const entryHit = p ? (bDir === 'long' ? p <= bestSig.entry : p >= bestSig.entry) : false;
+          const entryStatus = entryHit
+            ? '<span style="color:var(--long);font-weight:700">● ENTRY ZONE</span>'
+            : `<span style="color:var(--text-muted)">${Math.abs(entryDist)} pts away</span>`;
+          return `<div style="background:var(--bg-card);border:1px solid var(--border);border-left:3px solid ${bColor};border-radius:var(--radius);padding:14px 20px;min-width:260px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+            <span style="font-size:.7rem;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted)">🔥 Best Signal</span>
+            <span style="font-family:'JetBrains Mono',monospace;font-size:.68rem;color:var(--text-muted)">⏱ ${originStr}</span>
+          </div>
+          <div style="font-size:1rem;font-weight:800">${bestSig.name} <span style="color:${bColor};font-size:.8rem">${bDir.toUpperCase()}</span></div>
           <div style="font-family:'JetBrains Mono',monospace;font-size:.78rem;margin-top:4px;color:var(--text-secondary)">
             Entry ${bestSig.entry?.toFixed(2)} → <span style="color:var(--long)">TP ${bestSig.tp1?.toFixed(2)}</span> · <span style="color:var(--short)">SL ${bestSig.invalidation?.toFixed(2)}</span>
           </div>
-          <div style="font-family:'JetBrains Mono',monospace;font-size:1.4rem;font-weight:900;color:${confClass(bestConf) === 'high' ? 'var(--long)' : confClass(bestConf) === 'medium' ? 'var(--gold)' : 'var(--short)'};margin-top:2px">${bestConf}%</div>
-        </div>` : ''}
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px">
+            <div style="font-family:'JetBrains Mono',monospace;font-size:1.4rem;font-weight:900;color:${confClass(bestConf) === 'high' ? 'var(--long)' : confClass(bestConf) === 'medium' ? 'var(--gold)' : 'var(--short)'}">${bestConf}%</div>
+            <div style="font-size:.75rem">${entryStatus}</div>
+          </div>
+        </div>`;
+        })() : ''}
       </div>`;
   }
 
