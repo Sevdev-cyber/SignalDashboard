@@ -66,6 +66,7 @@ class SignalDashboardServer:
         self._bar_delta_pct = 0.0      # legacy: still used by engine
         self._bar_delta_raw = 0        # buy_vol - sell_vol (Bookmap style)
         self._session_cvd = 0          # session cumulative delta
+        self._bar_trade_value = 0.0    # sum(price * vol) for tick-level VWAP
 
         # WebSocket clients
         self._ws_clients: set = set()
@@ -194,15 +195,26 @@ class SignalDashboardServer:
             return
 
         from tcp_adapter import TickStreamerAdapter
-        from bar_builder import warmup_bars_to_df, append_bar
+        from bar_builder import warmup_bars_to_df, append_bar, apply_tick_deltas
 
         adapter = TickStreamerAdapter(host=self.tcp_host, port=self.tcp_port, dry_run=True)
 
         def on_warmup():
             self.bars_df = warmup_bars_to_df(adapter.warmup_bars)
+
+            # Apply real tick-based delta if warmup ticks available (Bookmap-grade accuracy)
+            if adapter.warmup_ticks:
+                log.info("🎯 Processing %d warmup ticks for real delta/CVD/VWAP...", len(adapter.warmup_ticks))
+                self.bars_df = apply_tick_deltas(self.bars_df, adapter.warmup_ticks)
+                log.info("✅ Tick-based delta applied to %d bars", len(self.bars_df))
+
             self.bar_count = len(self.bars_df)
             if not self.bars_df.empty:
                 self.current_price = float(self.bars_df.iloc[-1]["close"])
+                # Initialize session CVD from warmup data (so live bars continue from correct value)
+                if "cum_delta" in self.bars_df.columns:
+                    self._session_cvd = int(float(self.bars_df.iloc[-1].get("cum_delta", 0)))
+                    log.info("📊 Session CVD initialized at %+d from warmup", self._session_cvd)
             log.info("✅ Warmup: %d bars loaded | price=%.2f", self.bar_count, self.current_price)
             self._evaluate_and_broadcast()
 
@@ -214,24 +226,29 @@ class SignalDashboardServer:
             # Compute actual delta from tick data (Bookmap style: raw contracts)
             total_vol = self._bar_buy_vol + self._bar_sell_vol
             true_delta = self._bar_buy_vol - self._bar_sell_vol
+            trade_value = self._bar_trade_value
             self._bar_delta_raw = true_delta
             self._session_cvd += true_delta
 
             if total_vol > 0:
                 self._bar_delta_pct = (true_delta) / total_vol * 100
 
-            self.bars_df = append_bar(self.bars_df, bar, true_delta=true_delta)
+            self.bars_df = append_bar(self.bars_df, bar, true_delta=true_delta,
+                                      trade_value=trade_value)
             self.bar_count += 1
             last = self.bars_df.iloc[-1]
 
+            buy_v = self._bar_buy_vol
+            sell_v = self._bar_sell_vol
             self._bar_buy_vol = 0
             self._bar_sell_vol = 0
+            self._bar_trade_value = 0.0
 
             self.current_price = float(last["close"])
             log.info("BAR %d | C=%.2f | ATR=%.1f | Δ=%+d (buy=%d sell=%d) | CVD=%+d",
                      self.bar_count, self.current_price,
-                     float(last.get("atr", 0)), true_delta,
-                     self._bar_buy_vol, self._bar_sell_vol, self._session_cvd)
+                     float(last.get("atr", 0)), true_delta, buy_v, sell_v,
+                     self._session_cvd)
 
             now = time.time()
             if not hasattr(self, '_last_full_broadcast'):
@@ -249,6 +266,8 @@ class SignalDashboardServer:
                 self._bar_buy_vol += tick.size
             elif tick.aggressor == 2:
                 self._bar_sell_vol += tick.size
+            # Track trade value for tick-level VWAP (Bookmap style)
+            self._bar_trade_value += tick.price * tick.size
 
             # TP/SL resolve disabled — keep all signals visible for observation
             # TODO: re-enable when ready
