@@ -116,26 +116,23 @@ def apply_tick_deltas(bars_df: pd.DataFrame, warmup_ticks: list) -> pd.DataFrame
     bar_times = pd.to_datetime(frame["datetime"])
     bar_edges = bar_times.astype(np.int64).values  # nanosecond timestamps
 
-    # Parse all ticks into numpy arrays at once
-    tick_times = []
+    # Collect raw tick data (no per-tick parsing — batch later)
+    tick_times_raw = []
     tick_prices = []
     tick_sizes = []
     tick_aggrs = []
 
     for tick in warmup_ticks:
-        try:
-            tt = pd.to_datetime(tick.timestamp).value  # nanosecond int64
-        except Exception:
-            continue
-        tick_times.append(tt)
+        tick_times_raw.append(tick.timestamp)
         tick_prices.append(tick.price)
         tick_sizes.append(tick.size)
         tick_aggrs.append(tick.aggressor)
 
-    if not tick_times:
+    if not tick_times_raw:
         return bars_df
 
-    tick_times = np.array(tick_times, dtype=np.int64)
+    # Batch-convert timestamps (vectorized, not one-by-one)
+    tick_times = pd.to_datetime(tick_times_raw).values.astype(np.int64)
     tick_prices = np.array(tick_prices, dtype=np.float64)
     tick_sizes = np.array(tick_sizes, dtype=np.int64)
     tick_aggrs = np.array(tick_aggrs, dtype=np.int32)
