@@ -471,7 +471,7 @@ function updateChartHistory(bars) {
   try { 
       candleSeries.setData(unique); 
       
-      const cvdData = bars.filter(b => b.cum_delta !== undefined).map(b => ({
+      const cvdData = unique.filter(b => b.cum_delta != null).map(b => ({
           time: b.time,
           value: b.cum_delta
       }));
@@ -495,7 +495,7 @@ function updateChartTick(s) {
       close: s.price
     });
     
-    if (cvdSeries && s.cum_delta !== undefined) {
+    if (cvdSeries && s.cum_delta != null) {
         cvdSeries.update({
             time: lastBarTime,
             value: s.cum_delta
@@ -522,12 +522,12 @@ function updateState(s) {
   txt('statEma20', s.ema20?.toFixed(2) || '—');
   txt('statEma50', s.ema50?.toFixed(2) || '—');
   const de = $('statDelta');
-  if (s.delta_pct !== undefined) {
+  if (s.delta_pct != null) {
     de.textContent = (s.delta_pct >= 0 ? '+' : '') + s.delta_pct.toFixed(0) + '%';
     de.className = 'stat-value ' + (s.delta_pct > 5 ? 'positive' : s.delta_pct < -5 ? 'negative' : '');
   }
   const cvd = $('statCvd');
-  if (s.cum_delta !== undefined) {
+  if (s.cum_delta != null) {
     cvd.textContent = (s.cum_delta >= 0 ? '+' : '') + s.cum_delta.toFixed(0);
     cvd.className = 'stat-value ' + (s.cum_delta > 0 ? 'positive' : s.cum_delta < 0 ? 'negative' : '');
   }
@@ -809,7 +809,7 @@ function updateIndicators(s) {
     s.cvd_trend === 'RISING' ? 'bull' : s.cvd_trend === 'FALLING' ? 'bear' : '');
 
   // Delta streak
-  setInd('indDeltaStreak', s.delta_streak !== undefined ? (s.delta_streak > 0 ? '+' : '') + s.delta_streak : '—',
+  setInd('indDeltaStreak', s.delta_streak != null ? (s.delta_streak > 0 ? '+' : '') + s.delta_streak : '—',
     s.delta_streak > 2 ? 'bull' : s.delta_streak < -2 ? 'bear' : '');
 
   // Volume
