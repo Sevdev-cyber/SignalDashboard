@@ -68,6 +68,7 @@ class SignalDashboardServer:
         # WebSocket clients
         self._ws_clients: set = set()
         self.active_signals: dict = {}
+        self.resolved_signals: list[dict] = []  # signals that hit TP/SL (kept for chart markers)
         self._latest_state: dict = {}
         self._latest_signals: list[dict] = []
         self._latest_zones: dict = {}
@@ -91,6 +92,7 @@ class SignalDashboardServer:
                     "type": "full_update",
                     "state": self._latest_state,
                     "signals": self._latest_signals,
+                    "resolved": self.resolved_signals,
                     "zones": self._latest_zones,
                     "history": self.engine.get_history(),
                 }))
@@ -101,6 +103,7 @@ class SignalDashboardServer:
                         "type": "full_update",
                         "state": self._latest_state,
                         "signals": self._latest_signals,
+                        "resolved": self.resolved_signals,
                         "zones": self._latest_zones,
                         "history": self.engine.get_history(),
                     }))
@@ -211,7 +214,7 @@ class SignalDashboardServer:
             elif tick.aggressor == 2:
                 self._bar_sell_vol += tick.size
 
-            # Validate internal memory - drop signals that hit TP or SL
+            # Validate internal memory - resolve signals that hit TP or SL
             to_remove = []
             for sid, s in list(self.active_signals.items()):
                 buffer = 1.0  # 1 point (4 MNQ ticks) margin
@@ -227,10 +230,19 @@ class SignalDashboardServer:
                     elif self.current_price <= s["tp1"] + buffer:
                         hit = "TP"
                 if hit:
-                    log.info("🗑️ Signal REMOVED [%s] %s %s @ %.2f → hit %s (price=%.2f)",
+                    log.info("🗑️ Signal RESOLVED [%s] %s %s @ %.2f → hit %s (price=%.2f)",
                              s["name"], s["direction"], s["id"][:8], s["entry"], hit, self.current_price)
+                    resolved = dict(s)
+                    resolved["hit"] = hit
+                    resolved["hit_price"] = round(self.current_price, 2)
+                    resolved["hit_time"] = int(time.time())
+                    self.resolved_signals.append(resolved)
                     to_remove.append(sid)
-                        
+
+            # Keep last 100 resolved signals for chart history
+            if len(self.resolved_signals) > 100:
+                self.resolved_signals = self.resolved_signals[-100:]
+
             for r in to_remove:
                 del self.active_signals[r]
 
@@ -277,8 +289,11 @@ class SignalDashboardServer:
         for s in new_signals:
             matched = False
             for sid, acts in self.active_signals.items():
-                # Matching identical setups
-                if acts["name"] == s["name"] and acts["direction"] == s["direction"] and abs(acts["entry"] - s["entry"]) < 0.25:
+                # Matching identical setups by their stable logical ID from the generator
+                if acts["id"] == s["id"]:
+                    acts["entry"] = s["entry"]
+                    acts["sl"] = s["sl"]
+                    acts["tp1"] = s["tp1"]
                     if s["confidence_pct"] > acts["confidence_pct"]:
                         acts["confidence_pct"] = s["confidence_pct"]
                     matched = True
@@ -288,9 +303,8 @@ class SignalDashboardServer:
                 s["creation_time"] = now_ts
                 # Remember what bar it originated on
                 s["origin_bar"] = int(self.bar_count)
-                try:
-                    s["origin_time"] = int(self.bars_df.iloc[-1]["datetime"].timestamp())
-                except:
+                # Keep the true historical origin_time provided by the engine
+                if "origin_time" not in s:
                     s["origin_time"] = int(time.time())
                 self.active_signals[s["id"]] = s
 
@@ -338,6 +352,7 @@ class SignalDashboardServer:
                 "type": "full_update",
                 "state": state,
                 "signals": signals_payload,
+                "resolved": self.resolved_signals,
                 "zones": zones,
                 "history": self.engine.get_history(),
                 "bars": bars_for_chart,
@@ -366,6 +381,7 @@ class SignalDashboardServer:
                 "type": "tick_update",
                 "state": state,
                 "signals": signals_payload,
+                "resolved": self.resolved_signals,
                 "zones": self._latest_zones,
             }), self.loop)
 

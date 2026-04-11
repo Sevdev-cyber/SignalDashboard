@@ -396,7 +396,7 @@ function connect() {
     try {
       const d = JSON.parse(e.data);
       if (d.bars && d.bars.length > 0) updateChartHistory(d.bars);
-      if (d.signals) updateSignals(d.signals);
+      if (d.signals) updateSignals(d.signals, d.resolved || []);
       if (d.history) updateHistory(d.history);
       if (d.state) {
         updateState(d.state);
@@ -554,8 +554,21 @@ function updateState(s) {
 }
 
 // ═══ SIGNALS ═══
-function updateSignals(signals) {
+function snapToBar(ts) {
+  // Snap a timestamp to nearest known bar time so Lightweight Charts accepts it
+  if (!ts || chartBarTimes.size === 0) return null;
+  if (chartBarTimes.has(ts)) return ts;
+  let best = null, bestDiff = Infinity;
+  for (const bt of chartBarTimes) {
+    const diff = Math.abs(bt - ts);
+    if (diff < bestDiff) { bestDiff = diff; best = bt; }
+  }
+  return best;
+}
+
+function updateSignals(signals, resolved) {
   if (!signals) signals = [];
+  if (!resolved) resolved = [];
 
   // Sort by distance to current price
   const p = lastPrice || 0;
@@ -577,51 +590,51 @@ function updateSignals(signals) {
     priceLines.forEach(l => candleSeries.removePriceLine(l));
     priceLines = [];
     let markers = [];
-    
-    // helper to add markers and lines
-    const processSig = (sig) => {
+
+    // ── ACTIVE signals: price lines + arrow marker at origin candle ──
+    const processActive = (sig) => {
       const cLabel = sig.direction === 'long' ? '#10b981' : '#ef4444';
       const confStr = sig.confidence_pct ? Math.round(sig.confidence_pct) + '%' : '';
       const baseName = `${sig.name} ${confStr}`.trim();
-      
+
       if(sig.entry) priceLines.push(candleSeries.createPriceLine({ price: sig.entry, color: cLabel, lineWidth: 2, lineStyle: 2, axisLabelVisible: true, title: baseName + ' ENTRY' }));
       if(sig.tp1) priceLines.push(candleSeries.createPriceLine({ price: sig.tp1, color: '#06b6d4', lineWidth: 1, lineStyle: 1, axisLabelVisible: true, title: baseName + ' TP' }));
       if(sig.invalidation) priceLines.push(candleSeries.createPriceLine({ price: sig.invalidation, color: '#f59e0b', lineWidth: 1, lineStyle: 1, axisLabelVisible: true, title: baseName + ' SL' }));
 
-      // Marker: use origin_time, fallback to lastBarTime
-      let markerTime = sig.origin_time || lastBarTime;
-      if (markerTime && chartBarTimes.size > 0) {
-          // Snap to nearest known bar time so Lightweight Charts accepts it
-          if (!chartBarTimes.has(markerTime)) {
-              let best = null, bestDiff = Infinity;
-              for (const bt of chartBarTimes) {
-                  const diff = Math.abs(bt - markerTime);
-                  if (diff < bestDiff) { bestDiff = diff; best = bt; }
-              }
-              if (best !== null) markerTime = best;
-          }
+      let markerTime = snapToBar(sig.origin_time || lastBarTime);
+      if (markerTime) {
           markers.push({
               time: markerTime,
               position: sig.direction === 'long' ? 'belowBar' : 'aboveBar',
               color: cLabel,
               shape: sig.direction === 'long' ? 'arrowUp' : 'arrowDown',
-              text: sig.direction.toUpperCase() + ' ▶ ' + sig.name,
+              text: sig.direction.toUpperCase() + ' ▶ ' + sig.name + ' ' + confStr,
               size: 2
           });
       }
     };
 
-    top.forEach(processSig);
-    rest.forEach(processSig);
-    
+    top.forEach(processActive);
+    rest.forEach(processActive);
+
+    // ── RESOLVED signals: marker only (no price lines), at origin candle ──
+    resolved.forEach(sig => {
+      let markerTime = snapToBar(sig.origin_time);
+      if (!markerTime) return;
+      const isTP = sig.hit === 'TP';
+      markers.push({
+          time: markerTime,
+          position: sig.direction === 'long' ? 'belowBar' : 'aboveBar',
+          color: isTP ? '#06b6d4' : '#f59e0b',
+          shape: 'circle',
+          text: (isTP ? '✓ TP' : '✗ SL') + ' ' + sig.name + ' @ ' + (sig.hit_price || ''),
+          size: 1
+      });
+    });
+
     markers.sort((a,b) => a.time - b.time);
     try {
-        if (markers.length > 0) {
-            candleSeries.setMarkers(markers);
-            console.log('Markers set:', markers.length);
-        } else {
-            candleSeries.setMarkers([]);
-        }
+        candleSeries.setMarkers(markers);
     } catch(e) { console.error("Marker error", e); }
   }
 
