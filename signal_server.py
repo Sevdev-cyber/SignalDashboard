@@ -488,8 +488,10 @@ class SignalDashboardServer:
                     ts = int(dt.timestamp())
                 except AttributeError:
                     ts = int(pd.to_datetime(dt).timestamp())
+                # NT8 bar timestamps are CLOSE time (10:05 = bar 10:00-10:05)
+                # Lightweight Charts expects OPEN time → subtract 5 minutes
                 bars_for_chart.append({
-                    "time": ts,
+                    "time": ts - 300,  # shift back 5 min (close→open time)
                     "open": float(row["open"]),
                     "high": float(row["high"]),
                     "low": float(row["low"]),
