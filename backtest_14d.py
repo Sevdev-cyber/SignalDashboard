@@ -225,8 +225,8 @@ def main():
 
     # Group ticks by 5-min window for tick-level tracking
     ticks["bar_idx"] = np.searchsorted(
-        pd.to_datetime(bars["datetime"]).values.astype("int64"),
-        ticks["timestamp"].values.astype("int64"),
+        pd.to_datetime(bars["datetime"]).values.astype("datetime64[ns]").view(np.int64),
+        ticks["timestamp"].values.astype("datetime64[ns]").view(np.int64),
         side="right"
     ) - 1
     ticks["bar_idx"] = ticks["bar_idx"].clip(0, len(bars) - 1)

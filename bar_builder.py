@@ -114,10 +114,12 @@ def apply_tick_deltas(bars_df: pd.DataFrame, warmup_ticks: list) -> pd.DataFrame
 
     # Bar close times as int64 nanoseconds (bars are sorted chronologically)
     bar_dt = pd.to_datetime(frame["datetime"])
-    # Strip timezone if present (both bar/tick should be same tz from NT)
+    # Strip timezone if present
     if hasattr(bar_dt.dt, 'tz') and bar_dt.dt.tz is not None:
         bar_dt = bar_dt.dt.tz_localize(None)
-    bar_close_ns = bar_dt.values.astype(np.int64)
+    # CRITICAL: pandas 3.x uses datetime64[us] by default, ticks may be [ns]
+    # Force both to nanoseconds for consistent searchsorted comparison
+    bar_close_ns = bar_dt.values.astype("datetime64[ns]").view(np.int64)
 
     # Collect raw tick data
     tick_times_raw = []
@@ -133,13 +135,45 @@ def apply_tick_deltas(bars_df: pd.DataFrame, warmup_ticks: list) -> pd.DataFrame
     if not tick_times_raw:
         return bars_df
 
-    # Batch-convert timestamps
+    # Batch-convert timestamps — handle timezone mismatch
     tick_dt = pd.to_datetime(tick_times_raw)
     if hasattr(tick_dt, 'tz') and tick_dt.tz is not None:
         tick_dt = tick_dt.tz_localize(None)
-    tick_ns = tick_dt.values.astype(np.int64)
 
-    # Debug: log time ranges to diagnose bar assignment issues
+    # ── TIMEZONE ALIGNMENT ──
+    # NT8 sends both bars and ticks in the same timezone (usually ET/local)
+    # But pd.to_datetime may parse them differently.
+    # Verify: last tick should be near last bar (within ~5 min)
+    last_bar_ns = bar_close_ns[-1]
+    last_tick_ns = tick_dt[-1].value
+    drift_sec = abs(last_bar_ns - last_tick_ns) / 1e9
+    log.info("Bar last: %s | Tick last: %s | Drift: %.0fs",
+             bar_dt.iloc[-1], tick_dt[-1], drift_sec)
+
+    if drift_sec > 600:  # >10 min drift = likely tz problem
+        # Try to detect and correct timezone offset
+        # If bars are ahead of ticks by ~5h, bars may be UTC and ticks ET
+        offset_hours = round((last_bar_ns - last_tick_ns) / 1e9 / 3600)
+        if abs(offset_hours) in (4, 5):
+            log.warning("Detected %+dh timezone offset between bars and ticks! Correcting ticks.",
+                        offset_hours)
+            tick_dt = tick_dt + pd.Timedelta(hours=offset_hours)
+        elif abs(offset_hours) in (-4, -5):
+            log.warning("Detected %+dh timezone offset! Correcting ticks.", offset_hours)
+            tick_dt = tick_dt + pd.Timedelta(hours=offset_hours)
+        else:
+            log.warning("Large drift %.0fs but offset=%dh doesn't match ET/UTC. "
+                        "Skipping tick deltas!", drift_sec, offset_hours)
+            return bars_df
+
+        # Re-check after correction
+        drift_sec = abs(bar_close_ns[-1] - tick_dt[-1].value) / 1e9
+        log.info("After tz correction: drift=%.0fs", drift_sec)
+
+    # CRITICAL: force nanoseconds (pandas 3.x may parse as [us] or [ns] depending on input)
+    tick_ns = tick_dt.values.astype("datetime64[ns]").view(np.int64)
+
+    # Debug: log time ranges
     log.info("Bar time range: %s → %s (%d bars)",
              bar_dt.iloc[0], bar_dt.iloc[-1], len(bar_dt))
     log.info("Tick time range: %s → %s (%d ticks)",
@@ -175,12 +209,19 @@ def apply_tick_deltas(bars_df: pd.DataFrame, warmup_ticks: list) -> pd.DataFrame
     frame.loc[has_ticks, "buy_volume"] = bar_buy[has_ticks].astype(float)
     frame.loc[has_ticks, "sell_volume"] = bar_sell[has_ticks].astype(float)
 
-    # Distribution stats for debugging
+    # Distribution stats + sanity check
     unique_bars = np.unique(bar_indices)
     log.info("Tick delta: %d ticks → %d/%d bars with real delta | bar range: [%d..%d]",
              tick_count, real_count, len(frame),
              int(unique_bars[0]) if len(unique_bars) > 0 else -1,
              int(unique_bars[-1]) if len(unique_bars) > 0 else -1)
+
+    # Sanity: if >80% of ticks landed on 1 bar, mapping is broken
+    if real_count <= 1 and tick_count > 100:
+        log.error("⚠️ TICK MAPPING BROKEN: %d ticks → %d bar! "
+                  "Likely timezone mismatch. Falling back to estimated delta.",
+                  tick_count, real_count)
+        return enrich_bars(bars_df)  # return original without tick deltas
 
     return enrich_bars(frame)
 
