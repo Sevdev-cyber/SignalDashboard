@@ -73,7 +73,7 @@ def next_req_id():
 # BOOKMAP EVENT HANDLERS
 # ═══════════════════════════════════════════════════════════
 
-def handle_subscribe(addon_obj, alias, full_name, is_crypto, pips,
+def handle_subscribe(addon_state, alias, full_name, is_crypto, pips,
                      size_mult, instr_mult, features):
     """Called when user enables addon on an instrument."""
     alias_to_info[alias] = {
@@ -82,33 +82,34 @@ def handle_subscribe(addon_obj, alias, full_name, is_crypto, pips,
     }
     alias_to_order_book[alias] = bm.create_order_book()
 
-    # Subscribe to market data
-    bm.subscribe_to_depth(addon_obj, alias, next_req_id())
-    bm.subscribe_to_trades(addon_obj, alias, next_req_id())
-    bm.subscribe_to_order_info(addon_obj, alias, next_req_id())
-    bm.subscribe_to_position_updates(addon_obj, alias, next_req_id())
+    # Subscribe to market data (handlers registered globally in main)
+    bm.subscribe_to_depth(addon, alias, next_req_id())
+    bm.subscribe_to_trades(addon, alias, next_req_id())
+    bm.subscribe_to_order_info(addon, alias, next_req_id())
+    bm.subscribe_to_position_updates(addon, alias, next_req_id())
+    print(f"[Wizjoner] Subscribed to depth/trades/orders for {alias}", flush=True)
 
     # Register custom indicators on heatmap
     ind_signal_line[alias] = bm.register_indicator(
-        addon_obj, alias, "Wizjoner Entry",
-        graph_type=bm.IndicatorGraphType.PRIMARY,
-        color=(255, 215, 0), line_style=bm.LineStyle.SOLID, initial_value=0)
+        addon, alias, next_req_id(), "Wizjoner Entry",
+        graph_type="PRIMARY",
+        color=(255, 215, 0), line_style="SOLID", initial_value=0)
 
     ind_tp_line[alias] = bm.register_indicator(
-        addon_obj, alias, "Wizjoner TP",
-        graph_type=bm.IndicatorGraphType.PRIMARY,
-        color=(16, 185, 129), line_style=bm.LineStyle.DASHED, initial_value=0)
+        addon, alias, next_req_id(), "Wizjoner TP",
+        graph_type="PRIMARY",
+        color=(16, 185, 129), line_style="DASHED", initial_value=0)
 
     ind_sl_line[alias] = bm.register_indicator(
-        addon_obj, alias, "Wizjoner SL",
-        graph_type=bm.IndicatorGraphType.PRIMARY,
-        color=(239, 68, 68), line_style=bm.LineStyle.DASHED, initial_value=0)
+        addon, alias, next_req_id(), "Wizjoner SL",
+        graph_type="PRIMARY",
+        color=(239, 68, 68), line_style="DASHED", initial_value=0)
 
     # Settings panel
-    bm.add_string_settings_parameter(addon_obj, alias, "WS URL", DEFAULT_WS_URL)
-    bm.add_boolean_settings_parameter(addon_obj, alias, "Auto-Trade", False)
-    bm.add_number_settings_parameter(addon_obj, alias, "Contracts", 1, 1, 10, 1)
-    bm.add_number_settings_parameter(addon_obj, alias, "Min Confidence", 70, 30, 100, 5)
+    bm.add_string_settings_parameter(addon, alias, "WS URL", DEFAULT_WS_URL)
+    bm.add_boolean_settings_parameter(addon, alias, "Auto-Trade", False)
+    bm.add_number_settings_parameter(addon, alias, "Contracts", 1, 1, 10, 1)
+    bm.add_number_settings_parameter(addon, alias, "Min Confidence", 70, 30, 100, 5)
 
     print(f"[Wizjoner] Subscribed to {alias}", flush=True)
 
@@ -116,7 +117,7 @@ def handle_subscribe(addon_obj, alias, full_name, is_crypto, pips,
     threading.Thread(target=ws_listener_thread, args=(alias,), daemon=True).start()
 
 
-def handle_unsubscribe(addon_obj, alias):
+def handle_unsubscribe(addon_state, alias):
     """Called when user disables addon."""
     global ws_connected
     ws_connected = False
@@ -125,20 +126,20 @@ def handle_unsubscribe(addon_obj, alias):
     print(f"[Wizjoner] Unsubscribed from {alias}", flush=True)
 
 
-def handle_depth(addon_obj, alias, is_bid, price, size):
+def handle_depth(alias, is_bid, price, size):
     """Orderbook update — update local book."""
     if alias in alias_to_order_book:
         bm.on_depth(alias_to_order_book[alias], is_bid, price, size)
 
 
-def handle_trade(addon_obj, alias, price, size, is_otc,
+def handle_trade(alias, price, size, is_otc,
                  is_bid, is_execution_start, is_execution_end,
                  aggressor_order_id, passive_order_id):
-    """Trade tick — can forward to Wizjoner for enhanced delta."""
-    pass  # TODO: forward to Wizjoner if needed
+    """Trade tick from Bookmap."""
+    pass  # Available for future: forward to Wizjoner for enhanced delta
 
 
-def handle_order_update(addon_obj, event):
+def handle_order_update(event):
     """Order status update from Rithmic."""
     status = event.get("status", "")
     order_id = event.get("orderId", "")
@@ -151,7 +152,7 @@ def handle_order_update(addon_obj, event):
                 sig.filled = True
                 print(f"[Wizjoner] FILLED: {sig.direction} @ {sig.entry}", flush=True)
                 # Place SL and TP orders
-                place_bracket_orders(addon_obj, alias, sig)
+                place_bracket_orders(alias, sig)
                 break
 
     elif status == "CANCELLED":
@@ -164,12 +165,12 @@ def handle_order_update(addon_obj, event):
     print(f"[Wizjoner] Order update: {event}", flush=True)
 
 
-def handle_position_update(addon_obj, event):
+def handle_position_update(event):
     """Position change from Rithmic."""
     print(f"[Wizjoner] Position: {event}", flush=True)
 
 
-def handle_settings_change(addon_obj, alias, name, field_type, value):
+def handle_settings_change(addon, alias, name, field_type, value):
     """User changed settings in Bookmap GUI."""
     global ws_url
     if name == "WS URL":
@@ -182,99 +183,49 @@ def handle_settings_change(addon_obj, alias, name, field_type, value):
 # SIGNAL PROCESSING (from Wizjoner WebSocket)
 # ═══════════════════════════════════════════════════════════
 
-def on_interval(addon_obj, alias):
+def on_interval():
     """Called every 0.1s by Bookmap. Process commands + signals."""
     # Process queued commands from TCP socket
-    process_commands(addon_obj)
+    process_commands(addon)
 
     if not latest_signals:
         return
 
-    instrument = alias_to_info.get(alias)
-    if not instrument:
+    alias = next(iter(alias_to_info), None)
+    if not alias:
         return
 
+    instrument = alias_to_info[alias]
     pips = instrument["pips"]
 
     # Update indicator lines for best signal
-    if latest_signals:
-        best = latest_signals[0]
-        entry_level = int(best.get("entry", 0) / pips)
-        tp_level = int(best.get("tp1", 0) / pips)
-        sl_level = int(best.get("sl", 0) / pips)
+    best = latest_signals[0]
+    entry_level = int(best.get("entry", 0) / pips)
+    tp_level = int(best.get("tp1", 0) / pips)
+    sl_level = int(best.get("sl", 0) / pips)
 
-        if alias in ind_signal_line:
-            bm.add_point(addon_obj, alias, ind_signal_line[alias], entry_level)
-        if alias in ind_tp_line:
-            bm.add_point(addon_obj, alias, ind_tp_line[alias], tp_level)
-        if alias in ind_sl_line:
-            bm.add_point(addon_obj, alias, ind_sl_line[alias], sl_level)
-
-    # Auto-trade: place orders for high-confidence signals
-    # (only if Auto-Trade is enabled in settings)
-    for sig_data in latest_signals[:3]:
-        sid = sig_data.get("id", "")
-        if sid in active_signals:
-            continue  # already tracking
-
-        conf = sig_data.get("confidence_pct", 0)
-        grade = sig_data.get("quality_grade", "")
-        tier = sig_data.get("tier_label", "")
-        direction = sig_data.get("direction", "")
-
-        # Only trade high-quality signals
-        if conf < 70 or grade in ("D", "C"):
-            continue
-
-        if len(active_signals) >= MAX_ACTIVE_ORDERS:
-            continue
-
-        sig = SignalState(
-            signal_id=sid,
-            direction=direction,
-            entry=sig_data.get("entry", 0),
-            sl=sig_data.get("sl", 0),
-            tp1=sig_data.get("tp1", 0),
-            confidence=conf,
-            grade=grade,
-            tier=tier,
-        )
-        active_signals[sid] = sig
-
-        # Place limit order at entry
-        is_buy = direction == "long"
-        order = bm.OrderSendParameters(alias, is_buy, 1)  # 1 contract
-        order.limit_price = sig.entry
-        order.client_id = f"wiz-{sid[:16]}"
-        bm.send_order(addon_obj, order)
-        sig.order_id = order.client_id
-
-        arrow = "▲ LONG" if is_buy else "▼ SHORT"
-        bm.send_user_message(addon_obj, alias,
-                             f"[Wizjoner] {arrow} {sig_data.get('name','')} "
-                             f"conf={conf}% grade={grade} tier={tier} "
-                             f"entry={sig.entry:.2f} TP={sig.tp1:.2f} SL={sig.sl:.2f}")
-
-        print(f"[Wizjoner] ORDER SENT: {arrow} @ {sig.entry} "
-              f"(SL={sig.sl}, TP={sig.tp1})", flush=True)
+    if alias in ind_signal_line:
+        bm.add_point(addon, alias, ind_signal_line[alias], entry_level)
+    if alias in ind_tp_line:
+        bm.add_point(addon, alias, ind_tp_line[alias], tp_level)
+    if alias in ind_sl_line:
+        bm.add_point(addon, alias, ind_sl_line[alias], sl_level)
 
 
-def place_bracket_orders(addon_obj, alias, sig: SignalState):
+def place_bracket_orders(alias, sig: SignalState):
     """Place SL and TP bracket orders after entry fill."""
     is_buy = sig.direction == "long"
 
-    # TP: opposite direction limit
     tp_order = bm.OrderSendParameters(alias, not is_buy, 1)
     tp_order.limit_price = sig.tp1
     tp_order.client_id = f"wiz-tp-{sig.signal_id[:12]}"
-    bm.send_order(addon_obj, tp_order)
+    bm.send_order(addon, tp_order)
     sig.tp_order_id = tp_order.client_id
 
-    # SL: opposite direction stop
     sl_order = bm.OrderSendParameters(alias, not is_buy, 1)
     sl_order.stop_price = sig.sl
     sl_order.client_id = f"wiz-sl-{sig.signal_id[:12]}"
-    bm.send_order(addon_obj, sl_order)
+    bm.send_order(addon, sl_order)
     sig.sl_order_id = sl_order.client_id
 
     print(f"[Wizjoner] Bracket placed: TP={sig.tp1:.2f} SL={sig.sl:.2f}", flush=True)
