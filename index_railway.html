@@ -592,6 +592,15 @@ function renderPredSVG() {
     }
   }
 
+  // Sort by expected completion time for execution order numbering
+  const byExecOrder = [...predSignals].sort((a, b) => {
+    const aTime = (a.origin_time || 0) + (a.bars_to_tp || 10) * barSecs;
+    const bTime = (b.origin_time || 0) + (b.bars_to_tp || 10) * barSecs;
+    return aTime - bTime;
+  });
+  const execOrderMap = {};
+  byExecOrder.forEach((sig, i) => { execOrderMap[sig.id] = i + 1; });
+
   predSignals.forEach((sig, idx) => {
     const tp = sig.tp1;
     const sl = sig.invalidation || sig.sl;
@@ -601,6 +610,7 @@ function renderPredSVG() {
     const isLong = sig.direction === 'long';
     const isTop = idx < 3;
     const sigColor = isLong ? '#10b981' : '#ef4444';
+    const execNum = execOrderMap[sig.id] || idx + 1;
 
     // Origin = bar where signal was created
     const originTime = sig.origin_time || lastBarTime;
@@ -647,6 +657,18 @@ function renderPredSVG() {
       stroke: sigColor, 'stroke-width': filled ? 0 : 1.5,
       opacity: isTop ? go : go * 0.6
     }));
+    // Execution order number on dot
+    if (isTop && predSignals.length > 1) {
+      const numLabel = svgEl('text', {
+        x: oX, y: oY + 3.5,
+        fill: '#fff', 'font-size': 9, 'font-weight': 800,
+        'font-family': 'JetBrains Mono, monospace',
+        'text-anchor': 'middle', opacity: 0.95
+      });
+      numLabel.textContent = execNum;
+      predOverlay.appendChild(numLabel);
+    }
+
     // Grade D/C: add warning dash pattern around dot
     if ((grade === 'D' || grade === 'C') && isTop) {
       predOverlay.appendChild(svgEl('circle', {
@@ -953,7 +975,38 @@ function updateSignals(signals, resolved) {
           </div>
         </div>`;
         })() : ''}
-      </div>`;
+      </div>
+      ${signals.length > 1 ? (() => {
+        // ── EXECUTION QUEUE: timeline of signals sorted by expected completion ──
+        const sorted = [...signals].sort((a, b) => {
+          const aEta = (a.origin_time || 0) + (a.bars_to_tp || 10) * 300;
+          const bEta = (b.origin_time || 0) + (b.bars_to_tp || 10) * 300;
+          return aEta - bEta;
+        });
+        const queueItems = sorted.slice(0, 8).map((s, i) => {
+          const dir = s.direction === 'long';
+          const color = dir ? 'var(--long)' : 'var(--short)';
+          const arrow = dir ? '▲' : '▼';
+          const tierBadge = s.tier_label === 'GOLD' ? '★' : s.tier_label === 'SILVER' ? '◆' : '';
+          const filled = s.entry_touched ? '✓' : '○';
+          const filledColor = s.entry_touched ? 'var(--long)' : 'var(--text-muted)';
+          const eta = s.bars_to_tp || '?';
+          const gradeC = {'A+':'#10b981','A':'#06b6d4','B':'#94a3b8','C':'#f59e0b','D':'#ef4444'}[s.quality_grade||'B']||'#64748b';
+          return `<div style="display:flex;align-items:center;gap:6px;padding:3px 8px;background:var(--bg-card);border-radius:6px;border:1px solid var(--border);font-size:.7rem;font-family:'JetBrains Mono',monospace;white-space:nowrap">
+            <span style="color:${color};font-weight:900;font-size:.85rem;width:16px;text-align:center">${i+1}</span>
+            <span style="color:${color}">${arrow}</span>
+            <span style="color:var(--text-primary);font-weight:600">${s.name}</span>
+            <span style="color:${gradeC};font-size:.6rem;font-weight:700">${s.quality_grade||''}</span>
+            ${tierBadge ? `<span style="color:#f59e0b;font-size:.65rem">${tierBadge}</span>` : ''}
+            <span style="color:${filledColor};font-size:.75rem">${filled}</span>
+            <span style="color:var(--text-muted);font-size:.6rem">~${eta}b</span>
+          </div>`;
+        }).join('');
+        return `<div style="margin-top:8px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px 12px">
+          <div style="font-size:.6rem;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted);margin-bottom:5px">⏱ Execution Queue — fastest first</div>
+          <div style="display:flex;gap:4px;flex-wrap:wrap">${queueItems}</div>
+        </div>`;
+      })() : ''}`;
   }
 
   // Hide rest toggle (all signals are dots now)
