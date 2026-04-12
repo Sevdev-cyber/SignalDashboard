@@ -293,10 +293,24 @@ class SignalDashboardServer:
             # Track trade value for tick-level VWAP (Bookmap style)
             self._bar_trade_value += tick.price * tick.size
 
-            # TP/SL resolve disabled — keep all signals visible for observation
-            # TODO: re-enable when ready
+            # Track min/max price per active signal (detects SL/TP even if price bounces back)
+            p = tick.price
+            for sid, s in self.active_signals.items():
+                if "price_min" not in s:
+                    s["price_min"] = p
+                    s["price_max"] = p
+                s["price_min"] = min(s["price_min"], p)
+                s["price_max"] = max(s["price_max"], p)
+                # Track if entry was touched (limit filled)
+                if not s.get("entry_touched"):
+                    if s["direction"] == "long" and p <= s["entry"]:
+                        s["entry_touched"] = True
+                        s["entry_touched_time"] = int(time.time())
+                    elif s["direction"] == "short" and p >= s["entry"]:
+                        s["entry_touched"] = True
+                        s["entry_touched_time"] = int(time.time())
 
-            # Broadcast tick update every 4 seconds
+            # Broadcast tick update every 1 second
             now = time.time()
             if now - self._last_tick_broadcast >= 1:
                 self._last_tick_broadcast = now
@@ -342,27 +356,45 @@ class SignalDashboardServer:
         # Engine may stop regenerating a signal (pattern conditions shifted)
         # but the TRADE SETUP is still valid if levels haven't been breached.
 
+        # Use last bar time as reference (not wall clock — important for replay)
+        last_bar_time = 0
+        if not self.bars_df.empty:
+            dt = self.bars_df.iloc[-1].get("datetime")
+            if dt is not None:
+                try:
+                    last_bar_time = int(pd.to_datetime(dt).timestamp())
+                except Exception:
+                    last_bar_time = int(now_ts / 1000)
+            else:
+                last_bar_time = int(now_ts / 1000)
+        else:
+            last_bar_time = int(now_ts / 1000)
+
         def _is_dead(s, p, a):
             """Check if signal's trade setup has been invalidated.
 
-            Signal dies ONLY when price exits the SL↔TP range:
-            - SL breached → trade lost, remove
-            - TP1 hit → trade won, remove
-            - Session expired (>4h) → stale, remove
-            Price moving AWAY from entry is fine — limit order still valid.
+            Uses price_min/price_max to detect SL/TP hits even if price bounced back.
             """
-            # 1. SL breached (price went through stop)
-            if s["direction"] == "long" and p <= s["sl"]:
-                return "sl_hit"
-            if s["direction"] == "short" and p >= s["sl"]:
-                return "sl_hit"
-            # 2. TP1 hit (target reached)
-            if s["direction"] == "long" and p >= s["tp1"]:
-                return "tp_hit"
-            if s["direction"] == "short" and p <= s["tp1"]:
-                return "tp_hit"
-            # 3. Session timeout (>4 hours — prevents infinite accumulation)
-            age_s = (now_ts / 1000) - s.get("origin_time", now_ts / 1000)
+            pmin = s.get("price_min", p)
+            pmax = s.get("price_max", p)
+
+            if s["direction"] == "long":
+                # SL hit if price ever went below SL
+                if pmin <= s["sl"]:
+                    return "sl_hit"
+                # TP hit if price ever went above TP1
+                if pmax >= s["tp1"]:
+                    return "tp_hit"
+            else:
+                # SL hit if price ever went above SL
+                if pmax >= s["sl"]:
+                    return "sl_hit"
+                # TP hit if price ever went below TP1
+                if pmin <= s["tp1"]:
+                    return "tp_hit"
+
+            # Too old (>4h from last bar, not wall clock — works on replay)
+            age_s = last_bar_time - s.get("origin_time", last_bar_time)
             if age_s > 14400:
                 return "expired_4h"
             return None
@@ -384,10 +416,12 @@ class SignalDashboardServer:
         # Step 2: Add/update with freshly generated signals
         added = 0
         skipped_dead = 0
+        dead_reasons = {}
         for s in new_signals:
             death = _is_dead(s, price, atr)
             if death:
                 skipped_dead += 1
+                dead_reasons[death] = dead_reasons.get(death, 0) + 1
                 continue
 
             # Preserve creation_time + origin_time from existing signal
@@ -411,9 +445,17 @@ class SignalDashboardServer:
 
         self.active_signals = merged
 
-        log.info("Signals: %d active (carried=%d, new=%d, expired=%d, dead=%d) | bar=%d | price=%.2f",
+        log.info("Signals: %d active (carried=%d, new=%d, expired=%d, dead=%d %s) | bar=%d | price=%.2f",
                  len(self.active_signals), carried, added, expired, skipped_dead,
+                 dict(dead_reasons) if dead_reasons else "",
                  self.bar_count, self.current_price)
+        if skipped_dead > 0 and added == 0 and len(new_signals) > 0:
+            # Debug: show first few dead signals to diagnose
+            sample = new_signals[:3]
+            for s in sample:
+                log.info("  DEAD sample: %s %s entry=%.2f sl=%.2f tp1=%.2f | price=%.2f | reason=%s",
+                         s["direction"], s["name"], s["entry"], s["sl"], s["tp1"],
+                         price, _is_dead(s, price, atr))
 
         state = self.engine.get_market_state(
             self.bars_df,

@@ -633,10 +633,21 @@ function renderPredSVG() {
     const slY = candleSeries.priceToCoordinate(sl);
 
     // ── Origin dot (entry point on candle) ──
+    const filled = sig.entry_touched === true;
     predOverlay.appendChild(svgEl('circle', {
-      cx: oX, cy: oY, r: isTop ? 4 : 3,
-      fill: sigColor, opacity: isTop ? 0.8 : 0.5
+      cx: oX, cy: oY, r: isTop ? 5 : 3,
+      fill: filled ? sigColor : 'transparent',
+      stroke: sigColor, 'stroke-width': filled ? 0 : 1.5,
+      opacity: isTop ? 0.9 : 0.5
     }));
+    // If filled, add white checkmark ring
+    if (filled && isTop) {
+      predOverlay.appendChild(svgEl('circle', {
+        cx: oX, cy: oY, r: 7,
+        fill: 'none', stroke: '#fff', 'stroke-width': 1.2,
+        opacity: 0.6
+      }));
+    }
 
     // ── Dashed line origin → TP ──
     if (tpX != null && tpY != null) {
@@ -864,11 +875,17 @@ function updateSignals(signals, resolved) {
           const originStr = bestSig.origin_time ? new Date(bestSig.origin_time * 1000).toLocaleTimeString() : '—';
           const ageMin = bestSig.origin_time ? Math.round((Date.now()/1000 - bestSig.origin_time) / 60) : 0;
           const ageStr = ageMin < 60 ? `${ageMin}m ago` : `${Math.floor(ageMin/60)}h ${ageMin%60}m ago`;
-          const entryDist = p ? (bestSig.entry - p).toFixed(2) : '—';
-          const entryHit = p ? (bDir === 'long' ? p <= bestSig.entry : p >= bestSig.entry) : false;
-          const entryStatus = entryHit
-            ? '<span style="color:var(--long);font-weight:700">● ENTRY ZONE</span>'
-            : `<span style="color:var(--text-muted)">${Math.abs(entryDist)} pts away</span>`;
+          const entryDist = p ? Math.abs(bestSig.entry - p).toFixed(1) : '—';
+          const inZoneNow = p ? (bDir === 'long' ? p <= bestSig.entry : p >= bestSig.entry) : false;
+          const wasFilled = bestSig.entry_touched === true;
+          let entryStatus;
+          if (wasFilled) {
+            entryStatus = '<span style="color:var(--long);font-weight:700">✓ FILLED</span>';
+          } else if (inZoneNow) {
+            entryStatus = '<span style="color:var(--gold);font-weight:700;animation:pulse 1s infinite">● ENTRY NOW</span>';
+          } else {
+            entryStatus = `<span style="color:var(--text-muted)">${entryDist} pts away</span>`;
+          }
           const suppressTag = bestSig.dir_bias === 'suppressed'
             ? ' <span style="font-size:.6rem;color:var(--gold);border:1px solid var(--gold);padding:1px 4px;border-radius:3px">STŁUMIONY</span>'
             : bestSig.conflicted

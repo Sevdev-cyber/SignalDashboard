@@ -416,12 +416,12 @@ class SignalEngine:
                         f"({'↑' if dominant == 'long' else '↓'} "
                         f"{long_pct_adj:.0%}/{short_pct_adj:.0%})"
                     )
-                    log.info("Suppressed %s %s: %d%% → %d%% (bias: %s)",
-                             s["direction"], s["name"], old_conf,
-                             s["confidence_pct"], s.get("suppression_reason", ""))
-
             # Re-filter: remove signals that fell below 30% after suppression
+            before = len(signals)
             signals = [s for s in signals if s["confidence_pct"] >= 30]
+            suppressed_count = before - len(signals)
+            log.info("Direction bias: %s dominates (%.0f%% vs %.0f%%) — %d signals suppressed",
+                     dominant.upper(), long_pct_adj * 100, short_pct_adj * 100, suppressed_count)
         else:
             # Balanced conflict — mark all, let user see both sides
             log.info("⚖️ Direction conflict: LONG %.0f%% vs SHORT %.0f%% (balanced, showing both)",
