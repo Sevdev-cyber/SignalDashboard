@@ -63,8 +63,8 @@ SIGNAL_QUALITY = {
     ("ema_bounce", "short"):    0.75,   # 62% WR, SL 51%, -0.51 pts — slightly losing
     ("vwap_bounce", "short"):   0.70,   # 66% WR but SL only 38%... yet -2.86 pts PnL??
     ("volspike", "long"):       0.60,   # 67% WR but SL 61%, -6.04 pts — worst PnL
-    ("streak", "short"):        0.65,   # 63% WR, SL 60%, -0.63 pts — high volume loser
-    ("streak", "long"):         0.75,   # 56% WR, SL 60% — unreliable
+    ("streak", "short"):        0.70,   # 6+ buy streak SHORT only
+    ("streak", "long"):         1.15,   # 5+ sell streak → LONG: Tier 1 pattern, 90% WR
 }
 
 # Regime multipliers: signal type → regime → multiplier
@@ -81,6 +81,7 @@ REGIME_MULT = {
     "ib_break":      {"range": 1.1, "transition": 1.2, "trend_up": 1.0, "trend_down": 1.3, "chop": 0.7},
     "ib_retest":     {"range": 1.2, "transition": 1.3, "trend_up": 1.0, "trend_down": 1.3, "chop": 0.8},
     "ema_bounce":    {"range": 1.0, "transition": 1.0, "trend_up": 0.8, "trend_down": 0.8, "chop": 0.6},
+    "streak_rev":    {"range": 1.3, "transition": 1.1, "trend_up": 0.7, "trend_down": 0.7, "chop": 1.0},
 }
 
 # Time-of-day edges (from PATTERN_DISCOVERIES.md)
@@ -98,22 +99,28 @@ TIME_EDGES = {
 # Signal time profile: expected bars to TP1 resolution (from champion_trades.csv + 120d profiling)
 # Used by dashboard to project TP/SL dots at realistic distance
 # Values = typical bars on 5-min chart
+# Signal time profile: bars_to_tp (display), max_hold (expiry), optimal_tf (from study)
+# optimal_tf: the forward window (minutes) where PnL is best
 SIGNAL_TIME_PROFILE = {
-    "pullback":      {"bars_to_tp": 2,  "label": "Fast"},       # instant, 0-1 bar median
-    "exhaustion":    {"bars_to_tp": 6,  "label": "Quick"},      # 5-8 bars, mean reversion
-    "delta_div":     {"bars_to_tp": 8,  "label": "Quick"},      # ~6-10 bars, divergence resolves
-    "delta_accel":   {"bars_to_tp": 5,  "label": "Quick"},      # momentum burst, fast
-    "vwap_bounce":   {"bars_to_tp": 6,  "label": "Quick"},      # bounce from VWAP, medium
-    "ema_bounce":    {"bars_to_tp": 7,  "label": "Quick"},      # EMA rejection, medium
-    "trend_cont":    {"bars_to_tp": 10, "label": "Medium"},     # continuation, needs time
-    "waterfall":     {"bars_to_tp": 4,  "label": "Fast"},       # cascade, resolves quickly
-    "micro_smc":     {"bars_to_tp": 14, "label": "Slow"},       # BOS/CHOCH, structural
-    "break_retest":  {"bars_to_tp": 18, "label": "Slow"},       # retest of broken level
-    "reclaim":       {"bars_to_tp": 16, "label": "Slow"},       # reclaim pattern
-    "sweep":         {"bars_to_tp": 25, "label": "Very Slow"},  # sweep+reclaim, longest
-    "ib_break":      {"bars_to_tp": 11, "label": "Medium"},     # initial balance breakout
-    "orb":           {"bars_to_tp": 12, "label": "Medium"},     # opening range breakout
-    "vwap_loss":     {"bars_to_tp": 8,  "label": "Quick"},      # VWAP loss, medium
+    "pullback":      {"bars_to_tp": 2,  "label": "Fast",      "max_hold": 12,  "optimal_min": 5},
+    "exhaustion":    {"bars_to_tp": 6,  "label": "Quick",     "max_hold": 24,  "optimal_min": 60},
+    "sell_exhaust":  {"bars_to_tp": 2,  "label": "Scalp",     "max_hold": 6,   "optimal_min": 5},   # best at 1-5min!
+    "delta_div":     {"bars_to_tp": 12, "label": "Swing",     "max_hold": 48,  "optimal_min": 60},  # best at 60min
+    "delta_accel":   {"bars_to_tp": 5,  "label": "Quick",     "max_hold": 20,  "optimal_min": 20},
+    "vwap_bounce":   {"bars_to_tp": 6,  "label": "Quick",     "max_hold": 24,  "optimal_min": 10},
+    "ema_bounce":    {"bars_to_tp": 7,  "label": "Quick",     "max_hold": 24,  "optimal_min": 20},
+    "trend_cont":    {"bars_to_tp": 4,  "label": "Fast",      "max_hold": 16,  "optimal_min": 10},  # best at 10min
+    "waterfall":     {"bars_to_tp": 4,  "label": "Fast",      "max_hold": 12,  "optimal_min": 5},
+    "micro_smc":     {"bars_to_tp": 14, "label": "Slow",      "max_hold": 48,  "optimal_min": 60},
+    "break_retest":  {"bars_to_tp": 18, "label": "Slow",      "max_hold": 48,  "optimal_min": 60},
+    "reclaim":       {"bars_to_tp": 16, "label": "Slow",      "max_hold": 36,  "optimal_min": 60},
+    "sweep":         {"bars_to_tp": 25, "label": "Very Slow", "max_hold": 48,  "optimal_min": 60},
+    "ib_break":      {"bars_to_tp": 11, "label": "Medium",    "max_hold": 36,  "optimal_min": 60},  # grows with time
+    "ib_retest":     {"bars_to_tp": 12, "label": "Swing",     "max_hold": 48,  "optimal_min": 60},  # +43pts @60min
+    "orb":           {"bars_to_tp": 12, "label": "Medium",    "max_hold": 36,  "optimal_min": 30},
+    "vwap_loss":     {"bars_to_tp": 8,  "label": "Quick",     "max_hold": 20,  "optimal_min": 20},
+    "streak_rev":    {"bars_to_tp": 6,  "label": "Quick",     "max_hold": 24,  "optimal_min": 30},  # 90% WR sell streak
+    "vwap_mr":       {"bars_to_tp": 12, "label": "Swing",     "max_hold": 48,  "optimal_min": 60},  # 78% LONG
 }
 
 # Day-of-week edges
@@ -303,6 +310,8 @@ class SignalEngine:
                 "retrace_offset": round(retrace_offset, 2),
                 "entry_type": "limit",
                 "bars_to_tp": time_profile["bars_to_tp"],
+                "max_hold_bars": time_profile.get("max_hold", 48),
+                "optimal_min": time_profile.get("optimal_min", 20),
                 "speed_label": time_profile["label"],
                 "quality_grade": quality_grade,
                 "quality_mult": round(quality_mult, 2),

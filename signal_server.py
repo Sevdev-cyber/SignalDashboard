@@ -393,10 +393,12 @@ class SignalDashboardServer:
                 if pmin <= s["tp1"]:
                     return "tp_hit"
 
-            # Too old (>4h from last bar, not wall clock — works on replay)
+            # Per-signal hold time (scalps expire fast, swings stay longer)
+            max_hold = s.get("max_hold_bars", 48)  # from SIGNAL_TIME_PROFILE
+            max_hold_sec = max_hold * 300  # 5-min bars → seconds
             age_s = last_bar_time - s.get("origin_time", last_bar_time)
-            if age_s > 14400:
-                return "expired_4h"
+            if age_s > max_hold_sec:
+                return "expired"
             return None
 
         # Step 1: Carry forward existing signals that are still alive

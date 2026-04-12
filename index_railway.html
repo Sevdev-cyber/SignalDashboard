@@ -964,7 +964,7 @@ function updateSignals(signals, resolved) {
               {Fast:'rgba(16,185,129,.15)',Quick:'rgba(6,182,212,.15)',Medium:'rgba(245,158,11,.15)',Slow:'rgba(239,68,68,.15)'}[bestSig.speed_label||'Medium']||'rgba(100,116,139,.15)'
             };color:${
               {Fast:'#10b981',Quick:'#06b6d4',Medium:'#f59e0b',Slow:'#ef4444','Very Slow':'#dc2626'}[bestSig.speed_label||'Medium']||'#94a3b8'
-            }">${bestSig.speed_label||'Medium'} ~${bestSig.bars_to_tp||'?'}b</span>
+            }">${bestSig.speed_label||'Medium'} ~${bestSig.optimal_min||20}min hold</span>
           </div>
           <div style="font-family:'JetBrains Mono',monospace;font-size:.78rem;margin-top:4px;color:var(--text-secondary)">
             Entry ${bestSig.entry?.toFixed(2)} → <span style="color:var(--long)">TP ${bestSig.tp1?.toFixed(2)}</span> · <span style="color:var(--short)">SL ${bestSig.invalidation?.toFixed(2)}</span>

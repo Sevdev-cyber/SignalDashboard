@@ -96,6 +96,9 @@ class CompositeGenerator:
         # IB Break/Retest (from 37K signal study: 71% SHORT WR)
         from hsb.signals.ib_break import IBBreakGenerator
         self._ib_break = IBBreakGenerator(cfg.get("ib_break"))
+        # Delta Streak Reversal (PATTERN_DISCOVERIES Tier 1: 90% WR for 6× sell streak)
+        from hsb.signals.delta_streak import DeltaStreakGenerator
+        self._delta_streak = DeltaStreakGenerator(cfg.get("delta_streak"))
 
     # ------------------------------------------------------------------
     # Public API (matches CandidateGenerator protocol)
@@ -134,6 +137,8 @@ class CompositeGenerator:
         candidates.extend(self._ema_bounce.generate(bars, context))
         # IB Break/Retest — best high-volume signal: 71% SHORT, +5.81 pts
         candidates.extend(self._ib_break.generate(bars, context))
+        # Delta Streak Reversal — Tier 1: 90% WR for 5+ sell streak → LONG
+        candidates.extend(self._delta_streak.generate(bars, context))
 
         # Filter invalid candidates (NaN SL/entry from edge cases)
         import math
@@ -847,12 +852,13 @@ class CompositeGenerator:
         # Per-signal SL padding (same as _helpers.py)
         _PADDING = {
             "delta_div": 5.0, "delta_accel": 5.0, "exhaustion": 5.0, "fvg": 5.0,
-            # HIGH SL-HIT signals: extra wide SL (from 37K signal study)
-            "ema_bounce": 8.0, "vwap_bounce": 7.0, "ib_break": 8.0,
-            "volspike": 8.0, "streak": 7.0, "sell_exhaust": 7.0,
+            # Ultra-wide SL (14d backtest: 17-22% WR with 7-8pt padding)
+            "ema_bounce": 12.0, "vwap_bounce": 12.0, "vwap_loss": 10.0,
+            # High SL-hit
+            "ib_break": 8.0, "volspike": 8.0, "sell_exhaust": 7.0, "streak": 5.0,
             # Structure
             "break_retest": 2.0, "sweep": 2.0, "reclaim": 2.0,
-            "pullback": 3.0, "vwap_loss": 3.0, "trend_cont": 3.0,
+            "pullback": 3.0, "trend_cont": 3.0,
             "waterfall": 0.0,
         }
         pad = 0.0

@@ -48,17 +48,19 @@ def make_candidate(
         # Reversal/mean-reversion: wide SL (stop-hunt protection)
         "delta_div": 5.0, "delta_accel": 5.0, "exhaustion": 5.0,
         "fvg": 5.0,
-        # HIGH SL-HIT signals: extra wide SL (from 37K signal study)
-        "ema_bounce": 8.0,    # was 5 → SL hit 64% (long), 51% (short)
-        "vwap_bounce": 7.0,   # was 5 → needs more room
-        "ib_break": 8.0,      # long side SL hit 66%! needs wide buffer
-        "volspike": 8.0,      # SL hit 61%, worst PnL -6.04pts
-        "streak": 7.0,        # SL hit 60%, high volume loser
-        "sell_exhaust": 7.0,  # SL hit 61%
+        # CATASTROPHIC SL-HIT signals: ultra-wide SL (14d backtest: 17-22% WR with 7-8pt)
+        "ema_bounce": 12.0,    # 22% WR with 8pt → try 12pt (heavy stop-hunting)
+        "vwap_bounce": 12.0,   # 17% WR with 7pt → try 12pt
+        "vwap_loss": 10.0,     # 19% WR → try 10pt
+        # HIGH SL-HIT but not catastrophic
+        "ib_break": 8.0,       # long side SL hit 66%
+        "volspike": 8.0,       # SL hit 61%
+        "streak": 5.0,         # streak reversal — moderate
+        "sell_exhaust": 7.0,   # SL hit 61%
         # Structure: +2-3pts (noise buffer only)
         "break_retest": 2.0, "sweep": 2.0, "reclaim": 2.0,
-        "pullback": 3.0, "vwap_loss": 3.0, "trend_cont": 3.0,
-        # Momentum: 0pts (tight SL is correct — if momentum stops, exit)
+        "pullback": 3.0, "trend_cont": 3.0,
+        # Momentum: 0pts (tight SL is correct)
         "waterfall": 0.0,
     }
     sl_padding = 0.0
