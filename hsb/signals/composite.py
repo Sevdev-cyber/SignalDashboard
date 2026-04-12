@@ -93,6 +93,9 @@ class CompositeGenerator:
         self._delta_div = DeltaDivergenceGenerator(cfg.get("delta_divergence"))
         self._vwap_bounce = VWAPBounceGenerator(cfg.get("vwap_bounce"))
         self._ema_bounce = EMABounceGenerator(cfg.get("ema_bounce"))
+        # IB Break/Retest (from 37K signal study: 71% SHORT WR)
+        from hsb.signals.ib_break import IBBreakGenerator
+        self._ib_break = IBBreakGenerator(cfg.get("ib_break"))
 
     # ------------------------------------------------------------------
     # Public API (matches CandidateGenerator protocol)
@@ -129,6 +132,8 @@ class CompositeGenerator:
         candidates.extend(self._vwap_bounce.generate(bars, context))
         # Re-enabled V11: with +5pts SL padding, ema_bounce is 43% WR, +$2,247
         candidates.extend(self._ema_bounce.generate(bars, context))
+        # IB Break/Retest — best high-volume signal: 71% SHORT, +5.81 pts
+        candidates.extend(self._ib_break.generate(bars, context))
 
         # Filter invalid candidates (NaN SL/entry from edge cases)
         import math

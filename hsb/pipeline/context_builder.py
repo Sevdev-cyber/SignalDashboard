@@ -97,11 +97,27 @@ class ContextBuilder:
         else:
             total_path = abs(move)
 
+        # V2: pass EMA/VWAP/ATR for enhanced regime detection
+        last = bars_df.iloc[-1]
+        ema20 = float(last.get("ema_20", 0)) if "ema_20" in bars_df.columns else 0.0
+        ema50 = float(last.get("ema_50", 0)) if "ema_50" in bars_df.columns else 0.0
+        vwap = float(last.get("vwap", 0)) if "vwap" in bars_df.columns else 0.0
+        atr = float(last.get("atr", 20)) if "atr" in bars_df.columns else 20.0
+        # Previous EMA values (3 bars back for slope)
+        ema20_prev = float(bars_df.iloc[-3].get("ema_20", 0)) if len(bars_df) >= 3 and "ema_20" in bars_df.columns else 0.0
+        ema50_prev = float(bars_df.iloc[-3].get("ema_50", 0)) if len(bars_df) >= 3 and "ema_50" in bars_df.columns else 0.0
+
         return infer_regime(
             move_from_open=move,
             total_path=total_path,
             current_close=current_close,
             open_price=open_price,
+            ema20=ema20,
+            ema50=ema50,
+            ema20_prev=ema20_prev,
+            ema50_prev=ema50_prev,
+            vwap=vwap,
+            atr=atr,
         )
 
     def _resolve_gate(self, gate_mode: str, session: str, regime: RegimeInfo) -> GateConfig:

@@ -77,6 +77,10 @@ REGIME_MULT = {
     "pullback":      {"range": 0.8, "transition": 1.0, "trend_up": 1.2, "trend_down": 1.2, "chop": 0.7},
     "micro_smc":     {"range": 1.0, "transition": 1.0, "trend_up": 1.0, "trend_down": 1.0, "chop": 0.8},
     "delta_accel":   {"range": 0.9, "transition": 1.0, "trend_up": 1.1, "trend_down": 1.1, "chop": 0.7},
+    # New signals
+    "ib_break":      {"range": 1.1, "transition": 1.2, "trend_up": 1.0, "trend_down": 1.3, "chop": 0.7},
+    "ib_retest":     {"range": 1.2, "transition": 1.3, "trend_up": 1.0, "trend_down": 1.3, "chop": 0.8},
+    "ema_bounce":    {"range": 1.0, "transition": 1.0, "trend_up": 0.8, "trend_down": 0.8, "chop": 0.6},
 }
 
 # Time-of-day edges (from PATTERN_DISCOVERIES.md)
