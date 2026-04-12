@@ -22,9 +22,11 @@ from dataclasses import dataclass, field
 import bookmap as bm
 
 # ── CONFIG ──
-DEFAULT_WS_URL = "ws://66.42.117.137:8082"  # Wizjoner WS on VPS
+DEFAULT_WS_URL = "wss://web-production-3ff3f.up.railway.app/ws"  # Railway relay (works from anywhere)
 SIGNAL_CHECK_INTERVAL = 1.0  # seconds between signal polls
 MAX_ACTIVE_ORDERS = 2  # max simultaneous orders
+COMMAND_PORT = 9900  # local TCP port for LLM/script commands
+COMMAND_SECRET = "sacred"  # simple auth token
 
 
 @dataclass
@@ -181,7 +183,10 @@ def handle_settings_change(addon_obj, alias, name, field_type, value):
 # ═══════════════════════════════════════════════════════════
 
 def on_interval(addon_obj, alias):
-    """Called every 0.1s by Bookmap. Process new signals."""
+    """Called every 0.1s by Bookmap. Process commands + signals."""
+    # Process queued commands from TCP socket
+    process_commands(addon_obj)
+
     if not latest_signals:
         return
 
@@ -317,6 +322,239 @@ def ws_listener_thread(alias):
 
 
 # ═══════════════════════════════════════════════════════════
+# COMMAND SOCKET (local TCP — for LLM, SSH, scripts)
+# ═══════════════════════════════════════════════════════════
+#
+# Send JSON commands to localhost:9900 from anywhere:
+#
+#   # From terminal / SSH / LLM:
+#   echo '{"auth":"sacred","cmd":"buy","price":24500,"sl":24480,"tp":24530,"qty":1}' | nc localhost 9900
+#   echo '{"auth":"sacred","cmd":"sell","price":24500,"sl":24520,"tp":24470,"qty":2}' | nc localhost 9900
+#   echo '{"auth":"sacred","cmd":"cancel_all"}' | nc localhost 9900
+#   echo '{"auth":"sacred","cmd":"flatten"}' | nc localhost 9900
+#   echo '{"auth":"sacred","cmd":"status"}' | nc localhost 9900
+#
+#   # From Python:
+#   import socket, json
+#   s = socket.socket(); s.connect(("localhost", 9900))
+#   s.send(json.dumps({"auth":"sacred","cmd":"buy","price":24500,"sl":24480,"tp":24530}).encode())
+#   print(s.recv(4096).decode()); s.close()
+#
+#   # Via SSH from VPS:
+#   ssh user@mac 'echo "{\"auth\":\"sacred\",\"cmd\":\"buy\",\"price\":24500}" | nc localhost 9900'
+
+command_queue = []  # thread-safe queue processed by on_interval
+
+
+def command_server_thread():
+    """TCP server accepting JSON commands on localhost."""
+    import socket
+
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", COMMAND_PORT))
+    srv.listen(5)
+    srv.settimeout(1.0)
+    print(f"[Wizjoner] Command socket listening on localhost:{COMMAND_PORT}", flush=True)
+
+    while True:
+        try:
+            conn, addr = srv.accept()
+            data = conn.recv(4096).decode("utf-8", errors="ignore").strip()
+            if not data:
+                conn.close()
+                continue
+
+            try:
+                cmd = json.loads(data)
+            except json.JSONDecodeError:
+                conn.sendall(b'{"error":"invalid JSON"}\n')
+                conn.close()
+                continue
+
+            # Auth check
+            if cmd.get("auth") != COMMAND_SECRET:
+                conn.sendall(b'{"error":"unauthorized"}\n')
+                conn.close()
+                continue
+
+            # Queue command for processing in Bookmap thread (thread-safe)
+            command_queue.append((cmd, conn))
+
+        except socket.timeout:
+            continue
+        except Exception as e:
+            print(f"[Wizjoner] Command socket error: {e}", flush=True)
+            time.sleep(1)
+
+
+def process_commands(addon_obj):
+    """Process queued commands (called from on_interval in Bookmap thread)."""
+    while command_queue:
+        cmd, conn = command_queue.pop(0)
+        try:
+            result = execute_command(addon_obj, cmd)
+            conn.sendall(json.dumps(result).encode() + b"\n")
+        except Exception as e:
+            conn.sendall(json.dumps({"error": str(e)}).encode() + b"\n")
+        finally:
+            try:
+                conn.close()
+            except:
+                pass
+
+
+def execute_command(addon_obj, cmd: dict) -> dict:
+    """Execute a trading command."""
+    action = cmd.get("cmd", "")
+
+    # Find first subscribed alias (instrument)
+    alias = next(iter(alias_to_info), None)
+    if not alias and action not in ("status", "ping"):
+        return {"error": "no instrument subscribed"}
+
+    instrument = alias_to_info.get(alias, {})
+    pips = instrument.get("pips", 0.25)
+
+    if action == "ping":
+        return {"ok": True, "msg": "pong", "active_signals": len(active_signals)}
+
+    elif action == "status":
+        return {
+            "ok": True,
+            "instrument": alias,
+            "active_orders": len(active_signals),
+            "signals": [
+                {"id": s.signal_id, "dir": s.direction, "entry": s.entry,
+                 "sl": s.sl, "tp": s.tp1, "filled": s.filled,
+                 "conf": s.confidence, "grade": s.grade}
+                for s in active_signals.values()
+            ],
+            "ws_connected": ws_connected,
+            "latest_price": latest_state.get("price", 0),
+        }
+
+    elif action in ("buy", "sell"):
+        price = cmd.get("price", 0)
+        sl = cmd.get("sl", 0)
+        tp = cmd.get("tp", 0)
+        qty = cmd.get("qty", 1)
+        order_type = cmd.get("type", "limit")  # "limit" or "market"
+
+        if price <= 0 and order_type == "limit":
+            return {"error": "price required for limit order"}
+
+        is_buy = action == "buy"
+        order = bm.OrderSendParameters(alias, is_buy, qty)
+
+        if order_type == "market":
+            # Market order — no price needed
+            pass
+        else:
+            order.limit_price = price
+
+        client_id = f"cmd-{action}-{int(time.time())}"
+        order.client_id = client_id
+        bm.send_order(addon_obj, order)
+
+        # Track for bracket orders
+        sig = SignalState(
+            signal_id=client_id,
+            direction="long" if is_buy else "short",
+            entry=price,
+            sl=sl,
+            tp1=tp,
+            confidence=100,
+            grade="CMD",
+            tier="MANUAL",
+            order_id=client_id,
+        )
+        active_signals[client_id] = sig
+
+        arrow = "▲ BUY" if is_buy else "▼ SELL"
+        bm.send_user_message(addon_obj, alias,
+                             f"[CMD] {arrow} {qty}x @ {price:.2f} "
+                             f"SL={sl:.2f} TP={tp:.2f}")
+
+        return {"ok": True, "order_id": client_id, "action": action,
+                "price": price, "qty": qty, "sl": sl, "tp": tp}
+
+    elif action == "cancel_all":
+        cancelled = 0
+        for sid, sig in list(active_signals.items()):
+            if sig.order_id:
+                try:
+                    bm.cancel_order(addon_obj, alias, sig.order_id)
+                    cancelled += 1
+                except:
+                    pass
+            if sig.sl_order_id:
+                try:
+                    bm.cancel_order(addon_obj, alias, sig.sl_order_id)
+                except:
+                    pass
+            if sig.tp_order_id:
+                try:
+                    bm.cancel_order(addon_obj, alias, sig.tp_order_id)
+                except:
+                    pass
+        active_signals.clear()
+        bm.send_user_message(addon_obj, alias, f"[CMD] Cancelled {cancelled} orders")
+        return {"ok": True, "cancelled": cancelled}
+
+    elif action == "flatten":
+        # Cancel all orders + close position at market
+        for sid, sig in list(active_signals.items()):
+            for oid in [sig.order_id, sig.sl_order_id, sig.tp_order_id]:
+                if oid:
+                    try:
+                        bm.cancel_order(addon_obj, alias, oid)
+                    except:
+                        pass
+        active_signals.clear()
+
+        # Send market order to flatten (requires knowing current position)
+        bm.send_user_message(addon_obj, alias, "[CMD] Flatten — cancel all + close position")
+        return {"ok": True, "msg": "all cancelled, flatten manually if position open"}
+
+    elif action == "move_sl":
+        # Move SL for a specific or all active signals
+        new_sl = cmd.get("sl", 0)
+        target_id = cmd.get("id", None)
+        moved = 0
+        for sid, sig in active_signals.items():
+            if target_id and sid != target_id:
+                continue
+            if sig.sl_order_id:
+                try:
+                    bm.move_order(addon_obj, alias, sig.sl_order_id, new_sl)
+                    sig.sl = new_sl
+                    moved += 1
+                except:
+                    pass
+        return {"ok": True, "moved": moved, "new_sl": new_sl}
+
+    elif action == "move_tp":
+        new_tp = cmd.get("tp", 0)
+        target_id = cmd.get("id", None)
+        moved = 0
+        for sid, sig in active_signals.items():
+            if target_id and sid != target_id:
+                continue
+            if sig.tp_order_id:
+                try:
+                    bm.move_order(addon_obj, alias, sig.tp_order_id, new_tp)
+                    sig.tp1 = new_tp
+                    moved += 1
+                except:
+                    pass
+        return {"ok": True, "moved": moved, "new_tp": new_tp}
+
+    else:
+        return {"error": f"unknown command: {action}"}
+
+
+# ═══════════════════════════════════════════════════════════
 # MAIN — addon entry point
 # ═══════════════════════════════════════════════════════════
 
@@ -330,6 +568,9 @@ if __name__ == "__main__":
     bm.add_on_position_update_handler(addon, handle_position_update)
     bm.add_on_setting_change_handler(addon, handle_settings_change)
     bm.add_trades_handler(addon, handle_trade)
+
+    # Start command socket (local TCP for LLM/scripts)
+    threading.Thread(target=command_server_thread, daemon=True).start()
 
     # Start addon
     bm.start_addon(addon, handle_subscribe, handle_unsubscribe)
