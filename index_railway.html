@@ -632,18 +632,33 @@ function renderPredSVG() {
     const slX = futureX(slTime);
     const slY = candleSeries.priceToCoordinate(sl);
 
-    // ── Origin dot (entry point on candle) ──
+    // ── Origin dot — size/style reflects quality grade ──
     const filled = sig.entry_touched === true;
+    const grade = sig.quality_grade || 'B';
+    const gradeScale = {'A+':1.4, 'A':1.2, 'B':1.0, 'C':0.8, 'D':0.6};
+    const gradeOpacity = {'A+':0.95, 'A':0.85, 'B':0.7, 'C':0.5, 'D':0.35};
+    const gs = gradeScale[grade] || 1.0;
+    const go = gradeOpacity[grade] || 0.7;
+    const dotR = (isTop ? 5 : 3) * gs;
+
     predOverlay.appendChild(svgEl('circle', {
-      cx: oX, cy: oY, r: isTop ? 5 : 3,
+      cx: oX, cy: oY, r: dotR,
       fill: filled ? sigColor : 'transparent',
       stroke: sigColor, 'stroke-width': filled ? 0 : 1.5,
-      opacity: isTop ? 0.9 : 0.5
+      opacity: isTop ? go : go * 0.6
     }));
-    // If filled, add white checkmark ring
+    // Grade D/C: add warning dash pattern around dot
+    if ((grade === 'D' || grade === 'C') && isTop) {
+      predOverlay.appendChild(svgEl('circle', {
+        cx: oX, cy: oY, r: dotR + 3,
+        fill: 'none', stroke: '#f59e0b', 'stroke-width': 0.8,
+        'stroke-dasharray': '2,2', opacity: 0.5
+      }));
+    }
+    // Filled entry: white ring confirmation
     if (filled && isTop) {
       predOverlay.appendChild(svgEl('circle', {
-        cx: oX, cy: oY, r: 7,
+        cx: oX, cy: oY, r: dotR + 3,
         fill: 'none', stroke: '#fff', 'stroke-width': 1.2,
         opacity: 0.6
       }));
@@ -886,6 +901,9 @@ function updateSignals(signals, resolved) {
           } else {
             entryStatus = `<span style="color:var(--text-muted)">${entryDist} pts away</span>`;
           }
+          const gradeColors = {'A+':'#10b981','A':'#06b6d4','B':'#94a3b8','C':'#f59e0b','D':'#ef4444'};
+          const grade = bestSig.quality_grade || 'B';
+          const gradeTag = ` <span style="font-size:.6rem;font-weight:700;padding:1px 5px;border-radius:3px;background:${gradeColors[grade]||'#64748b'}22;color:${gradeColors[grade]||'#64748b'};border:1px solid ${gradeColors[grade]||'#64748b'}">${grade}</span>`;
           const suppressTag = bestSig.dir_bias === 'suppressed'
             ? ' <span style="font-size:.6rem;color:var(--gold);border:1px solid var(--gold);padding:1px 4px;border-radius:3px">STŁUMIONY</span>'
             : bestSig.conflicted
@@ -896,7 +914,7 @@ function updateSignals(signals, resolved) {
             <span style="font-size:.7rem;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted)">🔥 Best Signal</span>
             <span style="font-family:'JetBrains Mono',monospace;font-size:.68rem;color:var(--text-muted)">⏱ ${originStr} · ${ageStr}</span>
           </div>
-          <div style="font-size:1rem;font-weight:800">${bestSig.name} <span style="color:${bColor};font-size:.8rem">${bDir.toUpperCase()}</span>${suppressTag}
+          <div style="font-size:1rem;font-weight:800">${bestSig.name} <span style="color:${bColor};font-size:.8rem">${bDir.toUpperCase()}</span>${gradeTag}${suppressTag}
             <span style="font-size:.65rem;padding:2px 6px;border-radius:3px;margin-left:6px;background:${
               {Fast:'rgba(16,185,129,.15)',Quick:'rgba(6,182,212,.15)',Medium:'rgba(245,158,11,.15)',Slow:'rgba(239,68,68,.15)'}[bestSig.speed_label||'Medium']||'rgba(100,116,139,.15)'
             };color:${

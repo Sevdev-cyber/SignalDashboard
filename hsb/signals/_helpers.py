@@ -45,13 +45,20 @@ def make_candidate(
     # Momentum signals should have tight SL → if cascade stops, you're wrong.
     # Structure signals need SL at the structure level → small buffer only.
     _PADDING_BY_TYPE = {
-        # Reversal/mean-reversion: +5pts (86% quick-SL would-have-won)
+        # Reversal/mean-reversion: wide SL (stop-hunt protection)
         "delta_div": 5.0, "delta_accel": 5.0, "exhaustion": 5.0,
-        "ema_bounce": 5.0, "vwap_bounce": 5.0, "fvg": 5.0,
-        # Structure: +2pts (only noise buffer)
+        "fvg": 5.0,
+        # HIGH SL-HIT signals: extra wide SL (from 37K signal study)
+        "ema_bounce": 8.0,    # was 5 → SL hit 64% (long), 51% (short)
+        "vwap_bounce": 7.0,   # was 5 → needs more room
+        "ib_break": 8.0,      # long side SL hit 66%! needs wide buffer
+        "volspike": 8.0,      # SL hit 61%, worst PnL -6.04pts
+        "streak": 7.0,        # SL hit 60%, high volume loser
+        "sell_exhaust": 7.0,  # SL hit 61%
+        # Structure: +2-3pts (noise buffer only)
         "break_retest": 2.0, "sweep": 2.0, "reclaim": 2.0,
         "pullback": 3.0, "vwap_loss": 3.0, "trend_cont": 3.0,
-        # Momentum: 0pts (tight SL is correct)
+        # Momentum: 0pts (tight SL is correct — if momentum stops, exit)
         "waterfall": 0.0,
     }
     sl_padding = 0.0

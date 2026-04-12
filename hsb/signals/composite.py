@@ -841,8 +841,11 @@ class CompositeGenerator:
 
         # Per-signal SL padding (same as _helpers.py)
         _PADDING = {
-            "delta_div": 5.0, "delta_accel": 5.0, "exhaustion": 5.0,
-            "ema_bounce": 5.0, "vwap_bounce": 5.0, "fvg": 5.0,
+            "delta_div": 5.0, "delta_accel": 5.0, "exhaustion": 5.0, "fvg": 5.0,
+            # HIGH SL-HIT signals: extra wide SL (from 37K signal study)
+            "ema_bounce": 8.0, "vwap_bounce": 7.0, "ib_break": 8.0,
+            "volspike": 8.0, "streak": 7.0, "sell_exhaust": 7.0,
+            # Structure
             "break_retest": 2.0, "sweep": 2.0, "reclaim": 2.0,
             "pullback": 3.0, "vwap_loss": 3.0, "trend_cont": 3.0,
             "waterfall": 0.0,

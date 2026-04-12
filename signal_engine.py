@@ -31,6 +31,42 @@ from hsb.pipeline.regime import infer_regime
 from hsb.domain.enums import Direction
 
 
+# Historical signal quality weights (from 37,803 signal events study)
+# Positive = proven profitable, negative = SL hit > TP hit
+# Format: (signal_name_contains, direction) → multiplier
+# >1.0 = boost confidence, <1.0 = penalize
+SIGNAL_QUALITY = {
+    # ── PROVEN WINNERS (TP >> SL, positive PnL) ──
+    ("ib_break", "short"):      1.30,   # 71% WR, SL 53%, +5.81 pts — best high-volume
+    ("ib_retest", "short"):     1.35,   # 100% WR (small sample but stellar)
+    ("ib_retest", "long"):      1.25,   # 77% WR, +43 pts@60b
+    ("trend", "short"):         1.25,   # 61% WR, SL only 44%, +12.57 pts
+    ("trend", "long"):          1.15,   # 68% WR, +4.06 pts
+    ("delta_div", "short"):     1.30,   # 71% WR, SL 53%, +27.41 pts — best PnL
+    ("vwap_bounce", "long"):    1.20,   # 72% WR, +25.11 pts
+    ("vwap_mr", "long"):        1.20,   # 78% WR, +5.89 pts
+    ("vwap_mr", "short"):       1.10,   # 65% WR, +1.68 pts
+    ("delta_div", "long"):      1.05,   # 68% WR, +3.89 pts — decent but not stellar
+    ("pullback", "long"):       1.10,   # fast, proven in v6.7
+    ("pullback", "short"):      1.10,
+
+    # ── NEUTRAL (mixed results) ──
+    ("exhaust", "short"):       1.00,   # 61% WR, +3.24 pts — OK
+    ("exhaust", "long"):        0.85,   # 66% WR but SL 66%, -1.54 pts — SL=TP
+    ("sell_exhaust", "long"):   0.80,   # 66% WR but SL 61%, -2.42 pts — slightly losing
+    ("delta_accel", "short"):   1.00,   # mixed
+    ("delta_accel", "long"):    0.90,   # mixed
+
+    # ── PROVEN LOSERS (SL >> TP, negative PnL) — penalize hard ──
+    ("ib_break", "long"):       0.65,   # 65% WR but SL 66%!, -5.32 pts — trap signal
+    ("ema_bounce", "long"):     0.70,   # 67% WR but SL 64%, -2.81 pts — stop hunted
+    ("ema_bounce", "short"):    0.75,   # 62% WR, SL 51%, -0.51 pts — slightly losing
+    ("vwap_bounce", "short"):   0.70,   # 66% WR but SL only 38%... yet -2.86 pts PnL??
+    ("volspike", "long"):       0.60,   # 67% WR but SL 61%, -6.04 pts — worst PnL
+    ("streak", "short"):        0.65,   # 63% WR, SL 60%, -0.63 pts — high volume loser
+    ("streak", "long"):         0.75,   # 56% WR, SL 60% — unreliable
+}
+
 # Regime multipliers: signal type → regime → multiplier
 REGIME_MULT = {
     "exhaustion":    {"range": 1.3, "transition": 1.0, "trend_up": 0.5, "trend_down": 0.5, "chop": 0.8},
@@ -208,8 +244,26 @@ class SignalEngine:
             else:
                 delta_mult = 1.2 if bar_delta_pct < -5 else (0.8 if bar_delta_pct > 5 else 1.0)
 
+            # Historical quality weight (from 37K signal study)
+            quality_mult = 1.0
+            quality_grade = "B"  # default
+            for (sig_tag, sig_dir), qmult in SIGNAL_QUALITY.items():
+                if sig_tag in source_type.lower() and sig_dir == direction:
+                    quality_mult = qmult
+                    break
+            if quality_mult >= 1.20:
+                quality_grade = "A+"
+            elif quality_mult >= 1.10:
+                quality_grade = "A"
+            elif quality_mult >= 0.95:
+                quality_grade = "B"
+            elif quality_mult >= 0.75:
+                quality_grade = "C"
+            else:
+                quality_grade = "D"
+
             # Compute confidence
-            raw_conf = cand.score * regime_mult * time_mult * day_mult * delta_mult
+            raw_conf = cand.score * regime_mult * time_mult * day_mult * delta_mult * quality_mult
             confidence_pct = min(100, max(0, int(raw_conf * 100 / 0.75)))
 
             retrace_offset = cand.features.get("retrace_offset", 0) if hasattr(cand, "features") else 0
@@ -246,6 +300,8 @@ class SignalEngine:
                 "entry_type": "limit",
                 "bars_to_tp": time_profile["bars_to_tp"],
                 "speed_label": time_profile["label"],
+                "quality_grade": quality_grade,
+                "quality_mult": round(quality_mult, 2),
                 "reasons": cand.reasons if hasattr(cand, "reasons") else [],
                 "confluence_count": 0,
                 "confirming_signals": [],
