@@ -1,114 +1,205 @@
 #!/usr/bin/env python3
-"""Send trading commands to Bookmap Wizjoner Bridge.
+"""Send trading commands to NT8 TickStreamerMirror via TCP.
+
+NT8 is already approved by Bulenox/Rithmic — no extra API needed.
+Commands go: this script → TCP → NT8 → Rithmic → CME
+Bookmap sees orders automatically (same Rithmic account).
+
+Requirements:
+  - NT8 running on VPS with TickStreamerMirror
+  - AcceptCommands = true in TickStreamerMirror settings
+  - TCP port open (default 5557)
 
 Usage:
-    python trade.py buy 24500 --sl 24480 --tp 24530 --qty 2
-    python trade.py sell 24500 --sl 24520 --tp 24470
-    python trade.py buy market --qty 1
-    python trade.py status
-    python trade.py cancel_all
-    python trade.py flatten
-    python trade.py move_sl 24485
-    python trade.py move_tp 24540
+    python3 trade.py buy 24500                           # market buy 1 contract
+    python3 trade.py buy_limit 24500 --qty 2             # limit buy 2 contracts @ 24500
+    python3 trade.py sell_limit 24550 --qty 1             # limit sell 1 @ 24550
+    python3 trade.py buy_limit 24500 --sl 24480 --tp 24530  # limit + bracket SL/TP
+    python3 trade.py close                                # flatten position
+    python3 trade.py cancel MyOrder123                    # cancel specific order
+    python3 trade.py status                               # check connection
 
 From LLM/Claude:
     import subprocess
-    result = subprocess.run(["python3", "trade.py", "buy", "24500", "--sl", "24480", "--tp", "24530"],
-                            capture_output=True, text=True)
-    print(result.stdout)
+    r = subprocess.run(["python3", "trade.py", "buy_limit", "24500", "--sl", "24480", "--tp", "24530"],
+                       capture_output=True, text=True,
+                       cwd="/Users/sacredforest/Trading Setup/SignalDashboard/bookmap_addon")
+    print(r.stdout)
 
-Via SSH from VPS:
-    ssh user@mac 'cd /path/to/bookmap_addon && python3 trade.py buy 24500 --sl 24480 --tp 24530'
+Via SSH:
+    ssh sacredforest@mac 'python3 /path/to/trade.py buy_limit 24500 --sl 24480'
 """
 
 import socket
-import json
 import sys
+import time
 import argparse
 
-HOST = "127.0.0.1"
-PORT = 9900
-SECRET = "sacred"
+# ── NT8 TickStreamerMirror connection ──
+VPS_HOST = "66.42.117.137"
+TCP_PORT = 5557
+TIMEOUT = 5
 
 
-def send_command(cmd: dict) -> dict:
-    cmd["auth"] = SECRET
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(5)
+def send_command(cmd: str) -> str:
+    """Send TCP command to NT8 and read ACK response."""
     try:
-        s.connect((HOST, PORT))
-        s.sendall(json.dumps(cmd).encode())
-        response = s.recv(8192).decode()
-        return json.loads(response)
-    except ConnectionRefusedError:
-        return {"error": "Bookmap addon not running (connection refused on port 9900)"}
-    except Exception as e:
-        return {"error": str(e)}
-    finally:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(TIMEOUT)
+        s.connect((VPS_HOST, TCP_PORT))
+
+        # NT8 protocol: each message is a line ending with newline
+        s.sendall((cmd + "\n").encode("ascii"))
+
+        # Read response (ACK;...)
+        response = ""
+        try:
+            data = s.recv(4096).decode("ascii", errors="ignore")
+            response = data.strip()
+        except socket.timeout:
+            response = "TIMEOUT (no ACK received)"
+
         s.close()
+        return response
+    except ConnectionRefusedError:
+        return "ERROR: Connection refused — NT8 TickStreamerMirror not running or port blocked"
+    except Exception as e:
+        return f"ERROR: {e}"
+
+
+def send_and_print(cmd: str, description: str = ""):
+    """Send command and print result."""
+    if description:
+        print(f"→ {description}")
+    print(f"  CMD: {cmd}")
+    result = send_command(cmd)
+    print(f"  ACK: {result}")
+    return result
 
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python trade.py <command> [args]")
-        print("Commands: buy, sell, status, cancel_all, flatten, move_sl, move_tp, ping")
-        sys.exit(1)
+        print("""
+NT8 Trading Commands (via TickStreamerMirror TCP)
+═══════════════════════════════════════════════
+
+  Market orders:
+    python3 trade.py buy                          # market buy 1 contract
+    python3 trade.py sell                         # market sell 1 contract
+    python3 trade.py buy --qty 3                  # market buy 3 contracts
+
+  Limit orders:
+    python3 trade.py buy_limit 24500              # limit buy @ 24500
+    python3 trade.py sell_limit 24550 --qty 2     # limit sell 2x @ 24550
+
+  Stop orders:
+    python3 trade.py buy_stop 24550               # stop buy @ 24550
+    python3 trade.py sell_stop 24480              # stop sell @ 24480
+
+  Bracket (entry + SL + TP):
+    python3 trade.py buy_limit 24500 --sl 24480 --tp 24530
+    python3 trade.py sell_limit 24550 --sl 24570 --tp 24520
+
+  Position management:
+    python3 trade.py close                        # flatten all
+    python3 trade.py cancel MyOrderName           # cancel specific order
+
+  Status:
+    python3 trade.py ping                         # check connection
+
+  VPS: {VPS_HOST}:{TCP_PORT}
+""")
+        sys.exit(0)
 
     action = sys.argv[1].lower()
 
+    parser = argparse.ArgumentParser()
+    parser.add_argument("action")
+    parser.add_argument("price", nargs="?", default="0")
+    parser.add_argument("--qty", type=int, default=1)
+    parser.add_argument("--sl", type=float, default=0)
+    parser.add_argument("--tp", type=float, default=0)
+    parser.add_argument("--name", type=str, default="")
+    args = parser.parse_args()
+
+    # Generate order name
+    order_name = args.name or f"Claude_{action}_{int(time.time())}"
+    oco_group = f"oco_{int(time.time())}" if args.sl or args.tp else ""
+
     if action == "ping":
-        result = send_command({"cmd": "ping"})
+        send_and_print("PING", "Checking NT8 connection")
 
-    elif action == "status":
-        result = send_command({"cmd": "status"})
+    elif action == "buy":
+        # Market buy
+        send_and_print(f"BUY;{args.qty};{order_name}", f"Market BUY {args.qty}x")
 
-    elif action == "cancel_all":
-        result = send_command({"cmd": "cancel_all"})
+    elif action == "sell":
+        # Market sell
+        send_and_print(f"SELL;{args.qty};{order_name}", f"Market SELL {args.qty}x")
 
-    elif action == "flatten":
-        result = send_command({"cmd": "flatten"})
+    elif action == "buy_limit":
+        price = float(args.price)
+        send_and_print(
+            f"BUY_LIMIT;{args.qty};{price};{order_name};{oco_group}",
+            f"Limit BUY {args.qty}x @ {price}"
+        )
+        # Place bracket if SL/TP specified
+        if args.sl > 0:
+            sl_name = f"SL_{order_name}"
+            send_and_print(
+                f"SELL_STOP;{args.qty};{args.sl};{sl_name};{oco_group}",
+                f"  └─ SL SELL_STOP @ {args.sl}"
+            )
+        if args.tp > 0:
+            tp_name = f"TP_{order_name}"
+            send_and_print(
+                f"SELL_LIMIT;{args.qty};{args.tp};{tp_name};{oco_group}",
+                f"  └─ TP SELL_LIMIT @ {args.tp}"
+            )
 
-    elif action in ("buy", "sell"):
-        parser = argparse.ArgumentParser()
-        parser.add_argument("action")
-        parser.add_argument("price", nargs="?", default="0")
-        parser.add_argument("--sl", type=float, default=0)
-        parser.add_argument("--tp", type=float, default=0)
-        parser.add_argument("--qty", type=int, default=1)
-        args = parser.parse_args()
+    elif action == "sell_limit":
+        price = float(args.price)
+        send_and_print(
+            f"SELL_LIMIT;{args.qty};{price};{order_name};{oco_group}",
+            f"Limit SELL {args.qty}x @ {price}"
+        )
+        if args.sl > 0:
+            sl_name = f"SL_{order_name}"
+            send_and_print(
+                f"BUY_STOP;{args.qty};{args.sl};{sl_name};{oco_group}",
+                f"  └─ SL BUY_STOP @ {args.sl}"
+            )
+        if args.tp > 0:
+            tp_name = f"TP_{order_name}"
+            send_and_print(
+                f"BUY_LIMIT;{args.qty};{args.tp};{tp_name};{oco_group}",
+                f"  └─ TP BUY_LIMIT @ {args.tp}"
+            )
 
-        order_type = "market" if args.price == "market" else "limit"
-        price = 0 if order_type == "market" else float(args.price)
+    elif action == "buy_stop":
+        price = float(args.price)
+        send_and_print(
+            f"BUY_STOP;{args.qty};{price};{order_name};{oco_group}",
+            f"Stop BUY {args.qty}x @ {price}"
+        )
 
-        result = send_command({
-            "cmd": action,
-            "price": price,
-            "sl": args.sl,
-            "tp": args.tp,
-            "qty": args.qty,
-            "type": order_type,
-        })
+    elif action == "sell_stop":
+        price = float(args.price)
+        send_and_print(
+            f"SELL_STOP;{args.qty};{price};{order_name};{oco_group}",
+            f"Stop SELL {args.qty}x @ {price}"
+        )
 
-    elif action == "move_sl":
-        if len(sys.argv) < 3:
-            print("Usage: python trade.py move_sl <new_price> [--id order_id]")
-            sys.exit(1)
-        new_sl = float(sys.argv[2])
-        target_id = sys.argv[4] if len(sys.argv) > 4 and sys.argv[3] == "--id" else None
-        result = send_command({"cmd": "move_sl", "sl": new_sl, "id": target_id})
+    elif action == "close":
+        send_and_print("CLOSE", "Flatten position")
 
-    elif action == "move_tp":
-        if len(sys.argv) < 3:
-            print("Usage: python trade.py move_tp <new_price> [--id order_id]")
-            sys.exit(1)
-        new_tp = float(sys.argv[2])
-        target_id = sys.argv[4] if len(sys.argv) > 4 and sys.argv[3] == "--id" else None
-        result = send_command({"cmd": "move_tp", "tp": new_tp, "id": target_id})
+    elif action == "cancel":
+        name = args.price  # second arg = order name to cancel
+        send_and_print(f"CANCEL;{name}", f"Cancel order: {name}")
 
     else:
-        result = {"error": f"Unknown command: {action}"}
-
-    print(json.dumps(result, indent=2))
+        print(f"Unknown action: {action}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
