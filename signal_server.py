@@ -196,7 +196,9 @@ class SignalDashboardServer:
             return
 
         from tcp_adapter import TickStreamerAdapter
-        from bar_builder import warmup_bars_to_df, append_bar, apply_tick_deltas
+        from bar_builder import warmup_bars_to_df, append_bar, apply_tick_deltas, BarAccumulator, enrich_bars
+
+        bar_accum = BarAccumulator(target_min=5)
 
         adapter = TickStreamerAdapter(host=self.tcp_host, port=self.tcp_port, dry_run=True)
 
@@ -224,35 +226,51 @@ class SignalDashboardServer:
             self.executor.submit(self._evaluate_and_broadcast)
 
         def on_bar_close(bar):
-            from bar_builder import append_bar
             if self.bars_df.empty:
                 return
 
             # Compute actual delta from tick data (Bookmap style: raw contracts)
-            total_vol = self._bar_buy_vol + self._bar_sell_vol
-            true_delta = self._bar_buy_vol - self._bar_sell_vol
+            buy_v = self._bar_buy_vol
+            sell_v = self._bar_sell_vol
+            true_delta = buy_v - sell_v
             trade_value = self._bar_trade_value
             self._bar_delta_raw = true_delta
-            self._session_cvd += true_delta
 
+            total_vol = buy_v + sell_v
             if total_vol > 0:
                 self._bar_delta_pct = (true_delta) / total_vol * 100
 
-            self.bars_df = append_bar(self.bars_df, bar, true_delta=true_delta,
-                                      trade_value=trade_value)
-            self.bar_count += 1
-            last = self.bars_df.iloc[-1]
+            # Accumulate sub-5min bars into 5-min candles
+            completed = bar_accum.add_bar(bar, true_delta=true_delta,
+                                          buy_vol=float(buy_v), sell_vol=float(sell_v))
 
-            buy_v = self._bar_buy_vol
-            sell_v = self._bar_sell_vol
+            # Reset tick accumulators for next input bar
             self._bar_buy_vol = 0
             self._bar_sell_vol = 0
             self._bar_trade_value = 0.0
 
+            # Update current price from every input bar (responsive)
+            self.current_price = bar.close
+
+            if completed is None:
+                # Still accumulating — don't emit bar yet
+                log.debug("Accumulating bar: C=%.2f Δ=%+d", bar.close, true_delta)
+                return
+
+            # ── 5-min bar completed ──
+            self._session_cvd += int(completed["delta"])
+
+            new_row = completed  # already a dict with all fields
+            df = pd.concat([self.bars_df, pd.DataFrame([new_row])], ignore_index=True)
+            self.bars_df = enrich_bars(df)
+            self.bar_count += 1
+            last = self.bars_df.iloc[-1]
+
             self.current_price = float(last["close"])
-            log.info("BAR %d | C=%.2f | ATR=%.1f | Δ=%+d (buy=%d sell=%d) | CVD=%+d",
+            log.info("5MIN BAR %d | C=%.2f | ATR=%.1f | Δ=%+d (buy=%.0f sell=%.0f) | CVD=%+d",
                      self.bar_count, self.current_price,
-                     float(last.get("atr", 0)), true_delta, buy_v, sell_v,
+                     float(last.get("atr", 0)), int(completed["delta"]),
+                     completed.get("buy_volume", 0), completed.get("sell_volume", 0),
                      self._session_cvd)
 
             now = time.time()
@@ -316,48 +334,86 @@ class SignalDashboardServer:
         )
 
         now_ts = int(time.time() * 1000)
-        added = 0
-        skipped_dead = 0
         price = self.current_price
         atr = float(self.bars_df.iloc[-1].get("atr", 20)) if not self.bars_df.empty else 20
 
-        # Build new signal set (replace entirely to prevent accumulation)
-        new_active = {}
-        for s in new_signals:
-            # Pre-filter 1: skip signals where entry is too far from current price (>1.5 ATR)
-            entry_dist = abs(s["entry"] - price)
-            if entry_dist > atr * 1.5:
-                skipped_dead += 1
-                continue
+        # ── PERSISTENT SIGNAL MANAGEMENT ──
+        # Signals persist until SL/TP hit or price moves >2.5 ATR away.
+        # Engine may stop regenerating a signal (pattern conditions shifted)
+        # but the TRADE SETUP is still valid if levels haven't been breached.
 
-            # Pre-filter 2: skip signals where TP/SL already hit
-            buffer = 1.0
-            dead = False
-            if s["direction"] == "long":
-                if price <= s["sl"] + buffer or price >= s["tp1"] - buffer:
-                    dead = True
+        def _is_dead(s, p, a):
+            """Check if signal's trade setup has been invalidated.
+
+            Signal dies ONLY when price exits the SL↔TP range:
+            - SL breached → trade lost, remove
+            - TP1 hit → trade won, remove
+            - Session expired (>4h) → stale, remove
+            Price moving AWAY from entry is fine — limit order still valid.
+            """
+            # 1. SL breached (price went through stop)
+            if s["direction"] == "long" and p <= s["sl"]:
+                return "sl_hit"
+            if s["direction"] == "short" and p >= s["sl"]:
+                return "sl_hit"
+            # 2. TP1 hit (target reached)
+            if s["direction"] == "long" and p >= s["tp1"]:
+                return "tp_hit"
+            if s["direction"] == "short" and p <= s["tp1"]:
+                return "tp_hit"
+            # 3. Session timeout (>4 hours — prevents infinite accumulation)
+            age_s = (now_ts / 1000) - s.get("origin_time", now_ts / 1000)
+            if age_s > 14400:
+                return "expired_4h"
+            return None
+
+        # Step 1: Carry forward existing signals that are still alive
+        carried = 0
+        expired = 0
+        merged = {}
+        for sid, s in self.active_signals.items():
+            death = _is_dead(s, price, atr)
+            if death:
+                expired += 1
+                log.info("Signal expired: %s %s — reason: %s",
+                         s["direction"], s["name"], death)
             else:
-                if price >= s["sl"] - buffer or price <= s["tp1"] + buffer:
-                    dead = True
-            if dead:
+                merged[sid] = s
+                carried += 1
+
+        # Step 2: Add/update with freshly generated signals
+        added = 0
+        skipped_dead = 0
+        for s in new_signals:
+            death = _is_dead(s, price, atr)
+            if death:
                 skipped_dead += 1
                 continue
 
-            # Preserve creation_time from previous cycle if same signal
-            if s["id"] in self.active_signals:
+            # Preserve creation_time + origin_time from existing signal
+            if s["id"] in merged:
+                s["creation_time"] = merged[s["id"]].get("creation_time", now_ts)
+                s["origin_time"] = merged[s["id"]].get("origin_time", int(time.time()))
+                s["origin_bar"] = merged[s["id"]].get("origin_bar", int(self.bar_count))
+            elif s["id"] in self.active_signals:
                 s["creation_time"] = self.active_signals[s["id"]].get("creation_time", now_ts)
+                s["origin_time"] = self.active_signals[s["id"]].get("origin_time", int(time.time()))
+                s["origin_bar"] = self.active_signals[s["id"]].get("origin_bar", int(self.bar_count))
             else:
                 s["creation_time"] = now_ts
-            s["origin_bar"] = int(self.bar_count)
-            if "origin_time" not in s:
-                s["origin_time"] = int(time.time())
-            new_active[s["id"]] = s
-            added += 1
+                s["origin_bar"] = int(self.bar_count)
+                if "origin_time" not in s:
+                    s["origin_time"] = int(time.time())
 
-        self.active_signals = new_active
+            if s["id"] not in merged:
+                added += 1
+            merged[s["id"]] = s
 
-        log.info("Active signals: %d (added: %d, skipped dead: %d, engine: %d) | bar=%d | price=%.2f",
-                 len(self.active_signals), added, skipped_dead, len(new_signals), self.bar_count, self.current_price)
+        self.active_signals = merged
+
+        log.info("Signals: %d active (carried=%d, new=%d, expired=%d, dead=%d) | bar=%d | price=%.2f",
+                 len(self.active_signals), carried, added, expired, skipped_dead,
+                 self.bar_count, self.current_price)
 
         state = self.engine.get_market_state(
             self.bars_df,
@@ -443,7 +499,7 @@ class SignalDashboardServer:
             msg = self._safe_json(local_payload)
             asyncio.run_coroutine_threadsafe(self._ws_only(msg), self.loop)
 
-            # Relay: ultra-lightweight (~1-2KB) — just price + indicators
+            # Relay: lightweight — state + signals (so Railway dashboard stays in sync)
             now = time.time()
             if not hasattr(self, '_last_relay_tick'):
                 self._last_relay_tick = 0
@@ -452,6 +508,7 @@ class SignalDashboardServer:
                 relay_tick = {
                     "type": "tick_update",
                     "state": state,
+                    "signals": signals_payload[:10],
                 }
                 asyncio.run_coroutine_threadsafe(self._relay_push(relay_tick), self.loop)
 

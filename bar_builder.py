@@ -185,6 +185,62 @@ def apply_tick_deltas(bars_df: pd.DataFrame, warmup_ticks: list) -> pd.DataFrame
     return enrich_bars(frame)
 
 
+TARGET_TF_MIN = 5  # Dashboard always shows 5-min candles
+
+
+def resample_to_5min(df: pd.DataFrame) -> pd.DataFrame:
+    """Resample bars to 5-min candles.
+
+    If bars are already 5-min (or coarser), returns as-is.
+    If bars are finer (1-min, etc.), aggregates OHLCV+delta to 5-min.
+    """
+    if df.empty or len(df) < 2:
+        return df
+
+    dt = pd.to_datetime(df["datetime"])
+
+    # Detect input bar interval (median diff between consecutive bars)
+    diffs = dt.diff().dropna()
+    if diffs.empty:
+        return df
+    median_sec = diffs.median().total_seconds()
+
+    # If already >= 5 min, no resampling needed
+    if median_sec >= TARGET_TF_MIN * 60 - 10:  # 10s tolerance
+        log.info("Bars already %.0fs (~%.1fmin), no resample needed", median_sec, median_sec / 60)
+        return df
+
+    log.info("Resampling from %.0fs to %dmin bars (%d bars → ~%d)",
+             median_sec, TARGET_TF_MIN, len(df),
+             len(df) * median_sec / (TARGET_TF_MIN * 60))
+
+    frame = df.copy()
+    frame["datetime"] = dt
+    frame = frame.set_index("datetime")
+
+    # Use label='right' so the 5-min bar gets the CLOSE timestamp (matches NT8 convention)
+    agg = {
+        "open": "first",
+        "high": "max",
+        "low": "min",
+        "close": "last",
+        "volume": "sum",
+    }
+    if "delta" in frame.columns:
+        agg["delta"] = "sum"
+    if "buy_volume" in frame.columns:
+        agg["buy_volume"] = "sum"
+    if "sell_volume" in frame.columns:
+        agg["sell_volume"] = "sum"
+
+    resampled = frame.resample(f"{TARGET_TF_MIN}min", label="right", closed="right").agg(agg)
+    resampled = resampled.dropna(subset=["open"])  # drop empty periods
+    resampled = resampled.reset_index()
+
+    log.info("Resampled: %d → %d bars (5-min)", len(df), len(resampled))
+    return resampled
+
+
 def warmup_bars_to_df(warmup_bars: list) -> pd.DataFrame:
     """Convert WarmupBar list to DataFrame."""
     if not warmup_bars:
@@ -204,12 +260,113 @@ def warmup_bars_to_df(warmup_bars: list) -> pd.DataFrame:
 
     df = pd.DataFrame(records)
     df["datetime"] = pd.to_datetime(df["datetime"])
+
+    # Resample to 5-min if needed (e.g. NT8 sends 1-min bars)
+    df = resample_to_5min(df)
+
     return enrich_bars(df)
+
+
+# ── Live bar accumulator for sub-5min inputs ──
+
+class BarAccumulator:
+    """Accumulates sub-5min bars into 5-min candles.
+
+    If NT8 sends 1-min bars, this collects 5 of them before emitting
+    a complete 5-min bar. Tracks OHLCV + delta within the window.
+    """
+
+    def __init__(self, target_min: int = TARGET_TF_MIN):
+        self.target_sec = target_min * 60
+        self._pending_open = None
+        self._pending_high = -float("inf")
+        self._pending_low = float("inf")
+        self._pending_close = None
+        self._pending_volume = 0.0
+        self._pending_delta = 0.0
+        self._pending_buy = 0.0
+        self._pending_sell = 0.0
+        self._window_start = None
+        self._input_count = 0
+        self._detected_interval = None
+
+    def _detect_interval(self, bar_dt):
+        """Auto-detect input bar interval on first bar."""
+        if self._detected_interval is not None:
+            return
+        # Will be set properly after 2nd bar
+        self._detected_interval = 0
+
+    def add_bar(self, bar, true_delta: float = 0.0, buy_vol: float = 0.0,
+                sell_vol: float = 0.0) -> dict | None:
+        """Add a bar. Returns a completed 5-min bar dict, or None if still accumulating."""
+        bar_dt = pd.to_datetime(bar.timestamp)
+
+        # First bar: initialize window
+        if self._window_start is None:
+            # Align to 5-min boundary: floor to nearest 5-min
+            minute = bar_dt.minute
+            aligned_min = (minute // TARGET_TF_MIN) * TARGET_TF_MIN
+            self._window_start = bar_dt.replace(minute=aligned_min, second=0, microsecond=0)
+            self._pending_open = bar.open
+            self._pending_high = bar.high
+            self._pending_low = bar.low
+
+        # Window end = start + 5 min
+        window_end = self._window_start + pd.Timedelta(minutes=TARGET_TF_MIN)
+
+        # Check if this bar belongs to NEXT window
+        if bar_dt >= window_end and self._pending_open is not None:
+            # Emit the completed 5-min bar
+            completed = {
+                "datetime": window_end,  # close time (NT8 convention)
+                "open": self._pending_open,
+                "high": self._pending_high,
+                "low": self._pending_low,
+                "close": self._pending_close,
+                "volume": self._pending_volume,
+                "delta": self._pending_delta,
+                "buy_volume": self._pending_buy,
+                "sell_volume": self._pending_sell,
+            }
+
+            # Reset for new window
+            aligned_min = (bar_dt.minute // TARGET_TF_MIN) * TARGET_TF_MIN
+            self._window_start = bar_dt.replace(minute=aligned_min, second=0, microsecond=0)
+            self._pending_open = bar.open
+            self._pending_high = bar.high
+            self._pending_low = bar.low
+            self._pending_close = bar.close
+            self._pending_volume = bar.volume
+            self._pending_delta = true_delta
+            self._pending_buy = buy_vol
+            self._pending_sell = sell_vol
+            self._input_count += 1
+
+            log.debug("5min bar emitted: O=%.2f H=%.2f L=%.2f C=%.2f V=%.0f",
+                      completed["open"], completed["high"], completed["low"],
+                      completed["close"], completed["volume"])
+            return completed
+
+        # Accumulate into current window
+        self._pending_high = max(self._pending_high, bar.high)
+        self._pending_low = min(self._pending_low, bar.low)
+        self._pending_close = bar.close
+        self._pending_volume += bar.volume
+        self._pending_delta += true_delta
+        self._pending_buy += buy_vol
+        self._pending_sell += sell_vol
+        self._input_count += 1
+        return None
 
 
 def append_bar(bars_df: pd.DataFrame, bar, true_delta: float = 0.0,
                **kwargs) -> pd.DataFrame:
-    """Append a new bar and re-enrich."""
+    """Append a new bar and re-enrich.
+
+    NOTE: For sub-5min inputs, use BarAccumulator in signal_server.py instead.
+    This function is for direct 5-min bar appends.
+    """
     new_row = {
         "datetime": pd.to_datetime(bar.timestamp),
         "open": bar.open,

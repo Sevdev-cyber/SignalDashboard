@@ -89,7 +89,7 @@ def make_candidate(
         features.update(meta)
 
     return SignalCandidate(
-        id=f"{source_type}_{bar_index}_{uuid.uuid4().hex[:8]}",
+        id=f"{source_type}_{bar_index}_{direction.value}_{round(entry_price, 1)}",
         timestamp=timestamp,
         direction=direction,
         family=family,

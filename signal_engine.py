@@ -55,6 +55,27 @@ TIME_EDGES = {
     (16,): {"label": "Extended hours", "mult": 1.05},
 }
 
+# Signal time profile: expected bars to TP1 resolution (from champion_trades.csv + 120d profiling)
+# Used by dashboard to project TP/SL dots at realistic distance
+# Values = typical bars on 5-min chart
+SIGNAL_TIME_PROFILE = {
+    "pullback":      {"bars_to_tp": 2,  "label": "Fast"},       # instant, 0-1 bar median
+    "exhaustion":    {"bars_to_tp": 6,  "label": "Quick"},      # 5-8 bars, mean reversion
+    "delta_div":     {"bars_to_tp": 8,  "label": "Quick"},      # ~6-10 bars, divergence resolves
+    "delta_accel":   {"bars_to_tp": 5,  "label": "Quick"},      # momentum burst, fast
+    "vwap_bounce":   {"bars_to_tp": 6,  "label": "Quick"},      # bounce from VWAP, medium
+    "ema_bounce":    {"bars_to_tp": 7,  "label": "Quick"},      # EMA rejection, medium
+    "trend_cont":    {"bars_to_tp": 10, "label": "Medium"},     # continuation, needs time
+    "waterfall":     {"bars_to_tp": 4,  "label": "Fast"},       # cascade, resolves quickly
+    "micro_smc":     {"bars_to_tp": 14, "label": "Slow"},       # BOS/CHOCH, structural
+    "break_retest":  {"bars_to_tp": 18, "label": "Slow"},       # retest of broken level
+    "reclaim":       {"bars_to_tp": 16, "label": "Slow"},       # reclaim pattern
+    "sweep":         {"bars_to_tp": 25, "label": "Very Slow"},  # sweep+reclaim, longest
+    "ib_break":      {"bars_to_tp": 11, "label": "Medium"},     # initial balance breakout
+    "orb":           {"bars_to_tp": 12, "label": "Medium"},     # opening range breakout
+    "vwap_loss":     {"bars_to_tp": 8,  "label": "Quick"},      # VWAP loss, medium
+}
+
 # Day-of-week edges
 DAY_EDGES = {
     0: {"label": "Monday LONG bias", "long_mult": 1.15, "short_mult": 0.90},
@@ -192,6 +213,10 @@ class SignalEngine:
             confidence_pct = min(100, max(0, int(raw_conf * 100 / 0.75)))
 
             retrace_offset = cand.features.get("retrace_offset", 0) if hasattr(cand, "features") else 0
+
+            # Time profile: how many bars this signal type typically needs
+            time_profile = SIGNAL_TIME_PROFILE.get(base_source, {"bars_to_tp": 10, "label": "Medium"})
+
             enriched.append({
                 "id": cand.id,
                 "name": display_name or "UNKNOWN",
@@ -219,6 +244,8 @@ class SignalEngine:
                 "atr": round(atr, 1),
                 "retrace_offset": round(retrace_offset, 2),
                 "entry_type": "limit",
+                "bars_to_tp": time_profile["bars_to_tp"],
+                "speed_label": time_profile["label"],
                 "reasons": cand.reasons if hasattr(cand, "reasons") else [],
                 "confluence_count": 0,
                 "confirming_signals": [],
@@ -285,6 +312,10 @@ class SignalEngine:
         if pre_filter > 0:
             log.info("Confidence filter: %d -> %d (dropped %d)", pre_filter, len(enriched), pre_filter - len(enriched))
 
+        # ── DIRECTION CONFLICT RESOLUTION ──
+        # If both LONG and SHORT signals exist, resolve the conflict
+        enriched = self._resolve_direction_conflict(enriched, regime, ema50_trend, close_price, vwap_price)
+
         # Sort by confidence (highest first)
         enriched.sort(key=lambda s: s["confidence_pct"], reverse=True)
 
@@ -295,6 +326,115 @@ class SignalEngine:
         self._signal_history = self._signal_history[-50:]  # keep last 50
 
         return enriched
+
+    def _resolve_direction_conflict(
+        self,
+        signals: list[dict],
+        regime: str,
+        ema50_trend: str,
+        close_price: float,
+        vwap_price: float,
+    ) -> list[dict]:
+        """Resolve conflicting LONG/SHORT signals.
+
+        Strategy:
+        1. Calculate weighted directional strength (confidence × count)
+        2. Use regime, EMA trend, VWAP position as tiebreakers
+        3. If one direction dominates (>60%), suppress the minority
+        4. If balanced (<60/40), mark all as 'conflicted' — let user decide
+        """
+        longs = [s for s in signals if s["direction"] == "long"]
+        shorts = [s for s in signals if s["direction"] == "short"]
+
+        if not longs or not shorts:
+            # No conflict — tag winning direction as dominant
+            for s in signals:
+                s["dir_bias"] = "dominant"
+                s["conflicted"] = False
+            return signals
+
+        # Weighted strength = sum of confidence² (rewards high-conviction signals)
+        long_str = sum(s["confidence_pct"] ** 2 for s in longs)
+        short_str = sum(s["confidence_pct"] ** 2 for s in shorts)
+        total_str = long_str + short_str
+
+        if total_str == 0:
+            return signals
+
+        long_pct = long_str / total_str
+        short_pct = short_str / total_str
+
+        # Structural tiebreakers (each adds 5% bias)
+        bias_adj = 0.0  # positive = favors LONG, negative = favors SHORT
+
+        # EMA50 trend
+        if ema50_trend == "up":
+            bias_adj += 0.07
+        elif ema50_trend == "down":
+            bias_adj -= 0.07
+
+        # VWAP position
+        if close_price > vwap_price and vwap_price > 0:
+            bias_adj += 0.05
+        elif close_price < vwap_price and vwap_price > 0:
+            bias_adj -= 0.05
+
+        # Regime
+        if regime in ("trend_up",):
+            bias_adj += 0.08
+        elif regime in ("trend_down",):
+            bias_adj -= 0.08
+
+        # Apply bias adjustment
+        long_pct_adj = long_pct + bias_adj
+        short_pct_adj = short_pct - bias_adj
+
+        # Determine dominant direction
+        DOMINANCE_THRESHOLD = 0.55  # 55% = clear bias
+
+        dominant = None
+        if long_pct_adj >= DOMINANCE_THRESHOLD:
+            dominant = "long"
+        elif short_pct_adj >= DOMINANCE_THRESHOLD:
+            dominant = "short"
+
+        if dominant:
+            # Suppress minority direction: crush confidence so they drop off
+            for s in signals:
+                if s["direction"] == dominant:
+                    s["dir_bias"] = "dominant"
+                    s["conflicted"] = False
+                else:
+                    # Kill minority signals — multiply by (1 - dominance)
+                    suppress_factor = 0.25  # keep 25% of original confidence
+                    old_conf = s["confidence_pct"]
+                    s["confidence_pct"] = int(s["confidence_pct"] * suppress_factor)
+                    s["dir_bias"] = "suppressed"
+                    s["conflicted"] = False
+                    s["suppression_reason"] = (
+                        f"{dominant.upper()} dominuje "
+                        f"({'↑' if dominant == 'long' else '↓'} "
+                        f"{long_pct_adj:.0%}/{short_pct_adj:.0%})"
+                    )
+                    log.info("Suppressed %s %s: %d%% → %d%% (bias: %s)",
+                             s["direction"], s["name"], old_conf,
+                             s["confidence_pct"], s.get("suppression_reason", ""))
+
+            # Re-filter: remove signals that fell below 30% after suppression
+            signals = [s for s in signals if s["confidence_pct"] >= 30]
+        else:
+            # Balanced conflict — mark all, let user see both sides
+            log.info("⚖️ Direction conflict: LONG %.0f%% vs SHORT %.0f%% (balanced, showing both)",
+                     long_pct_adj * 100, short_pct_adj * 100)
+            for s in signals:
+                s["conflicted"] = True
+                s["dir_bias"] = "contested"
+                s["conflict_note"] = (
+                    f"LONG {long_pct_adj:.0%} vs SHORT {short_pct_adj:.0%} — "
+                    f"czekaj na rozstrzygnięcie"
+                )
+
+        return signals
 
     def get_history(self) -> list[dict]:
         """Return last 50 signal evaluations."""
