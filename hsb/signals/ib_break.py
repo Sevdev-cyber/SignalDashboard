@@ -82,15 +82,15 @@ class IBBreakGenerator:
                             id=f"derived_ib_break_short_{bar_idx}_{Direction.SHORT.value}_{round(entry, 1)}",
                             timestamp=timestamp,
                             direction=Direction.SHORT,
-                            family="ib_break",
+                            family="composite",
                             entry_price=round(entry, 2),
                             sl_price=round(sl, 2),
                             tp1_price=round(tp1, 2),
                             tp2_price=round(entry - ib_range, 2),
                             score=0.72,  # 71.2% WR from study
-                            signal_name="IB_BREAK_SHORT",
+
                             reasons=["ib_breakout", "delta_negative"],
-                            confluences=set(),
+
                             features={
                                 "bar_index": bar_idx,
                                 "risk": round(risk, 2),
@@ -116,15 +116,15 @@ class IBBreakGenerator:
                             id=f"derived_ib_break_long_{bar_idx}_{Direction.LONG.value}_{round(entry, 1)}",
                             timestamp=timestamp,
                             direction=Direction.LONG,
-                            family="ib_break",
+                            family="composite",
                             entry_price=round(entry, 2),
                             sl_price=round(sl, 2),
                             tp1_price=round(tp1, 2),
                             tp2_price=round(entry + ib_range, 2),
                             score=0.55,  # penalized: 34% net WR
-                            signal_name="IB_BREAK_LONG",
+
                             reasons=["ib_breakout", "delta_positive"],
-                            confluences=set(),
+
                             features={
                                 "bar_index": bar_idx,
                                 "risk": round(risk, 2),
@@ -157,9 +157,9 @@ class IBBreakGenerator:
                                 tp1_price=round(tp1, 2),
                                 tp2_price=round(entry - ib_range, 2),
                                 score=0.80,  # highest conviction
-                                signal_name="IB_RETEST_SHORT",
+
                                 reasons=["ib_retest", "delta_negative"],
-                                confluences=set(),
+    
                                 features={
                                     "bar_index": bar_idx,
                                     "risk": round(risk, 2),
@@ -187,9 +187,9 @@ class IBBreakGenerator:
                                 tp1_price=round(tp1, 2),
                                 tp2_price=round(entry + ib_range, 2),
                                 score=0.75,
-                                signal_name="IB_RETEST_LONG",
+
                                 reasons=["ib_retest", "delta_positive"],
-                                confluences=set(),
+    
                                 features={
                                     "bar_index": bar_idx,
                                     "risk": round(risk, 2),

@@ -95,16 +95,16 @@ class DeltaStreakGenerator:
                         id=f"derived_streak_rev_long_{bar_idx}_{Direction.LONG.value}_{round(entry, 1)}",
                         timestamp=timestamp,
                         direction=Direction.LONG,
-                        family="streak_reversal",
+                        family="composite",
                         entry_price=round(entry, 2),
                         sl_price=round(sl, 2),
                         tp1_price=round(tp1, 2),
                         tp2_price=round(entry + risk * 4.0, 2),
                         score=min(base_score, 0.85),
-                        signal_name="STREAK_REV_LONG",
+
                         reasons=[f"sell_streak_{sell_streak}",
                                  "reversal_bar" if reversal_bar else "no_reversal"],
-                        confluences=set(),
+
                         features={
                             "bar_index": bar_idx,
                             "risk": round(risk, 2),
@@ -136,16 +136,16 @@ class DeltaStreakGenerator:
                         id=f"derived_streak_rev_short_{bar_idx}_{Direction.SHORT.value}_{round(entry, 1)}",
                         timestamp=timestamp,
                         direction=Direction.SHORT,
-                        family="streak_reversal",
+                        family="composite",
                         entry_price=round(entry, 2),
                         sl_price=round(sl, 2),
                         tp1_price=round(tp1, 2),
                         tp2_price=round(entry - risk * 4.0, 2),
                         score=min(base_score, 0.80),
-                        signal_name="STREAK_REV_SHORT",
+
                         reasons=[f"buy_streak_{buy_streak}",
                                  "reversal_bar" if reversal_bar else "no_reversal"],
-                        confluences=set(),
+
                         features={
                             "bar_index": bar_idx,
                             "risk": round(risk, 2),

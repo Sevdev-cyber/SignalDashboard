@@ -235,7 +235,17 @@ class SignalEngine:
                 # else: keep the risk-based default tp1 (which is always directionally correct)
 
             # Regime multiplier
-            base_source = source_type.split("_")[1] if "_" in source_type and len(source_type.split("_")) > 1 else source_type
+            # Extract base signal type from source_type like "derived_ib_break_short"
+            # Try matching longest key in SIGNAL_TIME_PROFILE first
+            _st = source_type.lower().replace("derived_", "")
+            base_source = source_type
+            for key in sorted(SIGNAL_TIME_PROFILE.keys(), key=len, reverse=True):
+                if key in _st:
+                    base_source = key
+                    break
+            else:
+                # Fallback: second token
+                base_source = source_type.split("_")[1] if "_" in source_type and len(source_type.split("_")) > 1 else source_type
             regime_mult = REGIME_MULT.get(base_source, {}).get(regime, 1.0)
             regime_match = regime_mult >= 1.0
 
@@ -379,23 +389,22 @@ class SignalEngine:
             gold_tier = False
             gold_label = ""
 
-            if conf_count >= 2 and is_prime_hour and regime_ok:
-                # Full gold: all 3 filters met
+            # Count UNIQUE signal types confirming (not total count)
+            unique_confirms = len(set(sig.get("confirming_signals", [])))
+
+            if unique_confirms >= 2 and is_prime_hour and regime_ok:
                 gold_tier = True
                 gold_label = "GOLD"
-                sig["confidence_pct"] = min(100, int(sig["confidence_pct"] * 1.35 + 8))
-            elif conf_count >= 2 and is_prime_hour:
-                # Silver: 2 of 3 filters
-                gold_label = "SILVER"
-                sig["confidence_pct"] = min(100, int(sig["confidence_pct"] * 1.20 + 5))
-            elif conf_count >= 2 and regime_ok:
-                # Silver: 2 of 3 filters
+                sig["confidence_pct"] = min(100, int(sig["confidence_pct"] * 1.30 + 5))
+            elif unique_confirms >= 2 and is_prime_hour:
                 gold_label = "SILVER"
                 sig["confidence_pct"] = min(100, int(sig["confidence_pct"] * 1.15 + 3))
-            elif conf_count >= 3:
-                # High confluence alone
+            elif unique_confirms >= 2 and regime_ok:
                 gold_label = "SILVER"
-                sig["confidence_pct"] = min(100, int(sig["confidence_pct"] * 1.15))
+                sig["confidence_pct"] = min(100, int(sig["confidence_pct"] * 1.10 + 2))
+            elif unique_confirms >= 3:
+                gold_label = "SILVER"
+                sig["confidence_pct"] = min(100, int(sig["confidence_pct"] * 1.10))
 
             sig["gold_tier"] = gold_tier
             sig["tier_label"] = gold_label
@@ -406,6 +415,13 @@ class SignalEngine:
             if "FVG_FILL" in sig["name"] or "BOS_BULL" in sig["name"]:
                 sig["confidence_pct"] = 0
                 continue
+
+            # 0a. Minimum RR filter — reject signals with risk > reward
+            rr = sig["rr_ratio"]
+            if sig["risk_pts"] > 0:
+                actual_rr = abs(sig["tp1"] - sig["entry"]) / sig["risk_pts"]
+                if actual_rr < 1.0:
+                    sig["confidence_pct"] = int(sig["confidence_pct"] * 0.4)  # heavy penalty
 
             # 0b. Trend filter dla PULLBACK
             if "PULLBACK" in sig["name"]:
