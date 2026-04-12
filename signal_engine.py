@@ -335,24 +335,76 @@ class SignalEngine:
         if "close" in bars_df.columns and not bars_df.empty:
             close_price = bars_df["close"].iloc[-1]
 
+        # ── GOLD TIER DETECTION (from 37K signal study) ──
+        # Multi-filter combos that historically hit 65-88% net win rate
+        hour = now.hour
+        is_prime_hour = hour in (10, 11)  # 10-11 ET = best liquidity window
+
+        # Regime alignment check
+        def _regime_aligned(sig_dir, reg):
+            if sig_dir == "short" and reg in ("trend_down",):
+                return True
+            if sig_dir == "long" and reg in ("trend_up",):
+                return True
+            if reg in ("range",):
+                return True  # range works for both
+            return False
+
+        for sig in enriched:
+            conf_count = sig["confluence_count"]
+            dir_ = sig["direction"]
+            name = sig["name"]
+            src = sig["source_type"].lower()
+            regime_ok = _regime_aligned(dir_, regime)
+
+            # ── GOLD TIER: confluence ≥ 2 + prime hours + regime aligned ──
+            # DELTA_DIV_SHORT: 88% WR, +76 pts (N=8)
+            # VWAP_BOUNCE_SHORT: 71% WR, +12.5 pts (N=231)
+            # TREND_SHORT: 71% WR (N=324)
+            # IB_BREAK_SHORT: 64% WR, +24.8 pts (N=166)
+            # EMA_BOUNCE_SHORT: 62% WR, +24.6 pts (N=247)
+            gold_tier = False
+            gold_label = ""
+
+            if conf_count >= 2 and is_prime_hour and regime_ok:
+                # Full gold: all 3 filters met
+                gold_tier = True
+                gold_label = "GOLD"
+                sig["confidence_pct"] = min(100, int(sig["confidence_pct"] * 1.35 + 8))
+            elif conf_count >= 2 and is_prime_hour:
+                # Silver: 2 of 3 filters
+                gold_label = "SILVER"
+                sig["confidence_pct"] = min(100, int(sig["confidence_pct"] * 1.20 + 5))
+            elif conf_count >= 2 and regime_ok:
+                # Silver: 2 of 3 filters
+                gold_label = "SILVER"
+                sig["confidence_pct"] = min(100, int(sig["confidence_pct"] * 1.15 + 3))
+            elif conf_count >= 3:
+                # High confluence alone
+                gold_label = "SILVER"
+                sig["confidence_pct"] = min(100, int(sig["confidence_pct"] * 1.15))
+
+            sig["gold_tier"] = gold_tier
+            sig["tier_label"] = gold_label
+
         # POST-PROCESSING: Wzmacnianie i dławienie sygnałów według wyników testu 120-dniowego
         for sig in enriched:
             # 0. Twarde wycięcie trucizn (FVG_FILL, BOS_BULL)
             if "FVG_FILL" in sig["name"] or "BOS_BULL" in sig["name"]:
                 sig["confidence_pct"] = 0
                 continue
-                
+
             # 0b. Trend filter dla PULLBACK
             if "PULLBACK" in sig["name"]:
                 if sig["direction"] == "long" and ema50_trend == "down" and close_price < vwap_price:
-                    sig["confidence_pct"] = 0  # Blokada longów w twardym downtrendzie
+                    sig["confidence_pct"] = 0
                     continue
                 if sig["direction"] == "short" and ema50_trend == "up" and close_price > vwap_price:
-                    sig["confidence_pct"] = 0  # Blokada shortów w twardym uptrendzie
+                    sig["confidence_pct"] = 0
                     continue
-            # 1. Rule of 4 (Kaganiec na brak konfluencji)
-            #    < 4 konfluencje = historycznie 1-19% WR → obcinamy o połowę
-            if sig["confluence_count"] < 4:
+
+            # 1. Confluence penalty (non-gold only — gold already boosted)
+            if not sig.get("gold_tier") and sig["confluence_count"] < 4:
                 sig["confidence_pct"] = int(sig["confidence_pct"] * 0.5)
 
             # 2. Boost dla PULLBACK z odrzuceniem EMA (historycznie 98.9% WR)

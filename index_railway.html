@@ -655,8 +655,27 @@ function renderPredSVG() {
         'stroke-dasharray': '2,2', opacity: 0.5
       }));
     }
-    // Filled entry: white ring confirmation
-    if (filled && isTop) {
+    // Tier ring: GOLD = gold glow, SILVER = silver, filled = white
+    const tier = sig.tier_label || '';
+    if (tier === 'GOLD' && isTop) {
+      // Double gold ring for GOLD tier
+      predOverlay.appendChild(svgEl('circle', {
+        cx: oX, cy: oY, r: dotR + 4,
+        fill: 'none', stroke: '#f59e0b', 'stroke-width': 2,
+        opacity: 0.8
+      }));
+      predOverlay.appendChild(svgEl('circle', {
+        cx: oX, cy: oY, r: dotR + 7,
+        fill: 'none', stroke: '#f59e0b', 'stroke-width': 0.8,
+        opacity: 0.4
+      }));
+    } else if (tier === 'SILVER' && isTop) {
+      predOverlay.appendChild(svgEl('circle', {
+        cx: oX, cy: oY, r: dotR + 4,
+        fill: 'none', stroke: '#94a3b8', 'stroke-width': 1.2,
+        opacity: 0.5
+      }));
+    } else if (filled && isTop) {
       predOverlay.appendChild(svgEl('circle', {
         cx: oX, cy: oY, r: dotR + 3,
         fill: 'none', stroke: '#fff', 'stroke-width': 1.2,
@@ -692,22 +711,23 @@ function renderPredSVG() {
       }));
     }
 
-    // ── Name + speed label at origin ──
+    // ── Labels near TP dot ──
     const speedColors = {'Fast':'#10b981','Quick':'#06b6d4','Medium':'#f59e0b','Slow':'#ef4444','Very Slow':'#dc2626'};
     const speedLbl = sig.speed_label || 'Medium';
-    if (isTop) {
-      // Top signals: show speed tag near TP dot
-      if (tpX != null && tpY != null) {
-        const tag = svgEl('text', {
-          x: tpX + 6, y: tpY + 3,
-          fill: speedColors[speedLbl] || '#94a3b8', 'font-size': 8,
-          'font-family': 'JetBrains Mono, monospace',
-          'font-weight': 600, opacity: 0.7
-        });
-        tag.textContent = `${speedLbl} ~${sig.bars_to_tp || '?'}b`;
-        predOverlay.appendChild(tag);
-      }
-    } else {
+    if (isTop && tpX != null && tpY != null) {
+      // Tier + speed label near TP
+      const tierLbl = tier === 'GOLD' ? '★ GOLD' : tier === 'SILVER' ? 'SILVER' : '';
+      const labelColor = tier === 'GOLD' ? '#f59e0b' : tier === 'SILVER' ? '#94a3b8' : speedColors[speedLbl] || '#94a3b8';
+      const labelText = tierLbl ? `${tierLbl} · ${speedLbl}` : `${speedLbl} ~${sig.bars_to_tp || '?'}b`;
+      const tag = svgEl('text', {
+        x: tpX + 6, y: tpY + 3,
+        fill: labelColor, 'font-size': tier ? 9 : 8,
+        'font-family': 'JetBrains Mono, monospace',
+        'font-weight': tier ? 700 : 600, opacity: tier ? 0.9 : 0.7
+      });
+      tag.textContent = labelText;
+      predOverlay.appendChild(tag);
+    } else if (!isTop) {
       const label = svgEl('text', {
         x: oX + 5, y: oY - 4,
         fill: sigColor, 'font-size': 7,
@@ -903,6 +923,9 @@ function updateSignals(signals, resolved) {
           }
           const gradeColors = {'A+':'#10b981','A':'#06b6d4','B':'#94a3b8','C':'#f59e0b','D':'#ef4444'};
           const grade = bestSig.quality_grade || 'B';
+          const tier = bestSig.tier_label || '';
+          const tierColors = {'GOLD':'#f59e0b','SILVER':'#94a3b8'};
+          const tierTag = tier ? ` <span style="font-size:.6rem;font-weight:800;padding:1px 5px;border-radius:3px;background:${tierColors[tier]}22;color:${tierColors[tier]};border:1px solid ${tierColors[tier]};letter-spacing:.5px">${tier === 'GOLD' ? '★ ' : ''}${tier}</span>` : '';
           const gradeTag = ` <span style="font-size:.6rem;font-weight:700;padding:1px 5px;border-radius:3px;background:${gradeColors[grade]||'#64748b'}22;color:${gradeColors[grade]||'#64748b'};border:1px solid ${gradeColors[grade]||'#64748b'}">${grade}</span>`;
           const suppressTag = bestSig.dir_bias === 'suppressed'
             ? ' <span style="font-size:.6rem;color:var(--gold);border:1px solid var(--gold);padding:1px 4px;border-radius:3px">STŁUMIONY</span>'
@@ -914,7 +937,7 @@ function updateSignals(signals, resolved) {
             <span style="font-size:.7rem;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted)">🔥 Best Signal</span>
             <span style="font-family:'JetBrains Mono',monospace;font-size:.68rem;color:var(--text-muted)">⏱ ${originStr} · ${ageStr}</span>
           </div>
-          <div style="font-size:1rem;font-weight:800">${bestSig.name} <span style="color:${bColor};font-size:.8rem">${bDir.toUpperCase()}</span>${gradeTag}${suppressTag}
+          <div style="font-size:1rem;font-weight:800">${bestSig.name} <span style="color:${bColor};font-size:.8rem">${bDir.toUpperCase()}</span>${tierTag}${gradeTag}${suppressTag}
             <span style="font-size:.65rem;padding:2px 6px;border-radius:3px;margin-left:6px;background:${
               {Fast:'rgba(16,185,129,.15)',Quick:'rgba(6,182,212,.15)',Medium:'rgba(245,158,11,.15)',Slow:'rgba(239,68,68,.15)'}[bestSig.speed_label||'Medium']||'rgba(100,116,139,.15)'
             };color:${
