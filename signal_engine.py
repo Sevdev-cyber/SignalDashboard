@@ -31,40 +31,56 @@ from hsb.pipeline.regime import infer_regime
 from hsb.domain.enums import Direction
 
 
-# Historical signal quality weights (from 37,803 signal events study)
-# Positive = proven profitable, negative = SL hit > TP hit
-# Format: (signal_name_contains, direction) → multiplier
-# >1.0 = boost confidence, <1.0 = penalize
-SIGNAL_QUALITY = {
-    # ── PROVEN WINNERS (TP >> SL, positive PnL) ──
-    ("ib_break", "short"):      1.30,   # 71% WR, SL 53%, +5.81 pts — best high-volume
-    ("ib_retest", "short"):     1.35,   # 100% WR (small sample but stellar)
-    ("ib_retest", "long"):      1.25,   # 77% WR, +43 pts@60b
-    ("trend", "short"):         1.25,   # 61% WR, SL only 44%, +12.57 pts
-    ("trend", "long"):          1.15,   # 68% WR, +4.06 pts
-    ("delta_div", "short"):     1.30,   # 71% WR, SL 53%, +27.41 pts — best PnL
-    ("vwap_bounce", "long"):    1.20,   # 72% WR, +25.11 pts
-    ("vwap_mr", "long"):        1.20,   # 78% WR, +5.89 pts
-    ("vwap_mr", "short"):       1.10,   # 65% WR, +1.68 pts
-    ("delta_div", "long"):      1.05,   # 68% WR, +3.89 pts — decent but not stellar
-    ("pullback", "long"):       1.10,   # fast, proven in v6.7
-    ("pullback", "short"):      1.10,
+# Historical signal quality scores (from 37,803 signal events, composite metric)
+# Score 0-100: net_WR (40%) + MFE/MAE ratio (30%) + forward PnL (30%)
+# Used to scale confidence_pct for final ranking
+SIGNAL_SCORE = {
+    # ── TOP TIER (score 65-80) — best risk-adjusted signals ──
+    ("delta_div", "short"):     77,   # MFE/MAE=17.1, +27.4pts@60m, netWR 47%
+    ("trend", "short"):         73,   # MFE/MAE=23.6, +12.6pts, netWR 56% — most reliable
+    ("vwap_bounce", "short"):   68,   # MFE/MAE=24.6, high net WR 62%
+    ("ib_break", "short"):      66,   # MFE/MAE=17.3, +5.8pts, netWR 47%
+    ("ema_bounce", "short"):    64,   # MFE/MAE=16.6, netWR 49%
 
-    # ── NEUTRAL (mixed results) ──
-    ("exhaust", "short"):       1.00,   # 61% WR, +3.24 pts — OK
-    ("exhaust", "long"):        0.85,   # 66% WR but SL 66%, -1.54 pts — SL=TP
-    ("sell_exhaust", "long"):   0.80,   # 66% WR but SL 61%, -2.42 pts — slightly losing
-    ("delta_accel", "short"):   1.00,   # mixed
-    ("delta_accel", "long"):    0.90,   # mixed
+    # ── MID TIER (score 40-55) — decent, use with confluence ──
+    ("ib_retest", "long"):      49,   # small sample but +43pts@60m
+    ("exhaust", "short"):       46,   # MFE/MAE=2.9, +3.2pts
+    ("vwap_bounce", "long"):    46,   # +25pts@60m but low MFE/MAE
+    ("vwap_mr", "long"):        42,   # 78% TP hit, +5.9pts
+    ("streak", "short"):        40,   # 12K events, marginal
+    ("pullback", "long"):       45,   # fast execution, proven v6.7
+    ("pullback", "short"):      45,
+    ("delta_accel", "short"):   42,
+    ("delta_accel", "long"):    38,
+    ("vwap_mr", "short"):       37,
+    ("streak", "long"):         50,   # 5+ sell streak → LONG: Tier 1 (90% WR, rare)
 
-    # ── PROVEN LOSERS (SL >> TP, negative PnL) — penalize hard ──
-    ("ib_break", "long"):       0.65,   # 65% WR but SL 66%!, -5.32 pts — trap signal
-    ("ema_bounce", "long"):     0.70,   # 67% WR but SL 64%, -2.81 pts — stop hunted
-    ("ema_bounce", "short"):    0.75,   # 62% WR, SL 51%, -0.51 pts — slightly losing
-    ("vwap_bounce", "short"):   0.70,   # 66% WR but SL only 38%... yet -2.86 pts PnL??
-    ("volspike", "long"):       0.60,   # 67% WR but SL 61%, -6.04 pts — worst PnL
-    ("streak", "short"):        0.70,   # 6+ buy streak SHORT only
-    ("streak", "long"):         1.15,   # 5+ sell streak → LONG: Tier 1 pattern, 90% WR
+    # ── LOW TIER (score 25-35) — use only with gold tier filters ──
+    ("trend", "long"):          35,   # OK WR but low MFE/MAE
+    ("delta_div", "long"):      34,   # +3.9pts but high risk
+    ("exhaust", "long"):        30,   # SL=TP, breakeven
+    ("sell_exhaust", "long"):   30,   # marginal
+
+    # ── BOTTOM TIER (score <30) — consider disabling ──
+    ("ema_bounce", "long"):     29,   # stop-hunted, -2.8pts
+    ("ib_break", "long"):       29,   # trap signal, -5.3pts
+    ("volspike", "long"):       28,   # worst PnL -6.0pts
+}
+
+# Confluence boost per signal (from study: solo vs conf WR delta)
+CONFLUENCE_EFFECT = {
+    ("vwap_bounce", "short"):   20,   # +20% WR with confluence!
+    ("vwap_mr", "short"):       18,   # +18%
+    ("trend", "long"):          17,   # +17% — huge boost
+    ("trend", "short"):         5,
+    ("ib_break", "short"):      3,
+    ("delta_div", "long"):      3,
+    # Negative confluence (worse with more signals):
+    ("vwap_bounce", "long"):   -14,   # gets WORSE with confluence
+    ("delta_div", "short"):    -7,
+    ("volspike", "long"):      -6,
+    ("ib_break", "long"):      -5,
+    ("streak", "long"):        -5,
 }
 
 # Regime multipliers: signal type → regime → multiplier
@@ -265,25 +281,29 @@ class SignalEngine:
             else:
                 delta_mult = 1.2 if bar_delta_pct < -5 else (0.8 if bar_delta_pct > 5 else 1.0)
 
-            # Historical quality weight (from 37K signal study)
-            quality_mult = 1.0
-            quality_grade = "B"  # default
-            for (sig_tag, sig_dir), qmult in SIGNAL_QUALITY.items():
-                if sig_tag in source_type.lower() and sig_dir == direction:
-                    quality_mult = qmult
+            # Historical quality score (from 37K signal study, 0-100 composite)
+            base_quality = 40  # default if not in table
+            for (sig_tag, sig_dir), qscore in SIGNAL_SCORE.items():
+                if sig_tag in _st and sig_dir == direction:
+                    base_quality = qscore
                     break
-            if quality_mult >= 1.20:
+
+            # Grade from score
+            if base_quality >= 65:
                 quality_grade = "A+"
-            elif quality_mult >= 1.10:
+            elif base_quality >= 50:
                 quality_grade = "A"
-            elif quality_mult >= 0.95:
+            elif base_quality >= 40:
                 quality_grade = "B"
-            elif quality_mult >= 0.75:
+            elif base_quality >= 30:
                 quality_grade = "C"
             else:
                 quality_grade = "D"
 
-            # Compute confidence
+            # Quality multiplier: score/50 so 50=neutral, 77=1.54x, 28=0.56x
+            quality_mult = base_quality / 50.0
+
+            # Compute confidence (wider range: use multipliers but keep 0-100)
             raw_conf = cand.score * regime_mult * time_mult * day_mult * delta_mult * quality_mult
             confidence_pct = min(100, max(0, int(raw_conf * 100 / 0.75)))
 
@@ -432,9 +452,24 @@ class SignalEngine:
                     sig["confidence_pct"] = 0
                     continue
 
-            # 1. Confluence penalty (non-gold only — gold already boosted)
-            if not sig.get("gold_tier") and sig["confluence_count"] < 4:
-                sig["confidence_pct"] = int(sig["confidence_pct"] * 0.5)
+            # 1. Confluence effect (data-driven per signal type)
+            src = sig["source_type"].lower().replace("derived_", "")
+            conf_effect = 0
+            for (sig_tag, sig_dir), eff in CONFLUENCE_EFFECT.items():
+                if sig_tag in src and sig_dir == sig["direction"]:
+                    conf_effect = eff
+                    break
+
+            has_confluence = sig["confluence_count"] >= 2
+            if has_confluence and conf_effect > 0:
+                # Positive confluence: boost
+                sig["confidence_pct"] = min(100, sig["confidence_pct"] + conf_effect // 2)
+            elif has_confluence and conf_effect < 0:
+                # Negative confluence: penalty (signal gets worse with more signals)
+                sig["confidence_pct"] = max(10, sig["confidence_pct"] + conf_effect)
+            elif not has_confluence and not sig.get("gold_tier"):
+                # No confluence, no gold: moderate penalty
+                sig["confidence_pct"] = int(sig["confidence_pct"] * 0.7)
 
             # 2. Boost dla PULLBACK z odrzuceniem EMA (historycznie 98.9% WR)
             if "PULLBACK" in sig["name"]:
@@ -536,29 +571,16 @@ class SignalEngine:
             dominant = "short"
 
         if dominant:
-            # Suppress minority direction: crush confidence so they drop off
+            # Tag but DON'T suppress — user wants to see all signals
             for s in signals:
                 if s["direction"] == dominant:
                     s["dir_bias"] = "dominant"
                     s["conflicted"] = False
                 else:
-                    # Kill minority signals — multiply by (1 - dominance)
-                    suppress_factor = 0.25  # keep 25% of original confidence
-                    old_conf = s["confidence_pct"]
-                    s["confidence_pct"] = int(s["confidence_pct"] * suppress_factor)
-                    s["dir_bias"] = "suppressed"
+                    s["dir_bias"] = "minority"
                     s["conflicted"] = False
-                    s["suppression_reason"] = (
-                        f"{dominant.upper()} dominuje "
-                        f"({'↑' if dominant == 'long' else '↓'} "
-                        f"{long_pct_adj:.0%}/{short_pct_adj:.0%})"
-                    )
-            # Re-filter: remove signals that fell below 30% after suppression
-            before = len(signals)
-            signals = [s for s in signals if s["confidence_pct"] >= 30]
-            suppressed_count = before - len(signals)
-            log.info("Direction bias: %s dominates (%.0f%% vs %.0f%%) — %d signals suppressed",
-                     dominant.upper(), long_pct_adj * 100, short_pct_adj * 100, suppressed_count)
+            log.info("Direction bias: %s (%.0f%% vs %.0f%%) — all signals kept",
+                     dominant.upper(), long_pct_adj * 100, short_pct_adj * 100)
         else:
             # Balanced conflict — mark all, let user see both sides
             log.info("⚖️ Direction conflict: LONG %.0f%% vs SHORT %.0f%% (balanced, showing both)",

@@ -949,17 +949,17 @@ function updateSignals(signals, resolved) {
           const tierColors = {'GOLD':'#f59e0b','SILVER':'#94a3b8'};
           const tierTag = tier ? ` <span style="font-size:.6rem;font-weight:800;padding:1px 5px;border-radius:3px;background:${tierColors[tier]}22;color:${tierColors[tier]};border:1px solid ${tierColors[tier]};letter-spacing:.5px">${tier === 'GOLD' ? '★ ' : ''}${tier}</span>` : '';
           const gradeTag = ` <span style="font-size:.6rem;font-weight:700;padding:1px 5px;border-radius:3px;background:${gradeColors[grade]||'#64748b'}22;color:${gradeColors[grade]||'#64748b'};border:1px solid ${gradeColors[grade]||'#64748b'}">${grade}</span>`;
-          const suppressTag = bestSig.dir_bias === 'suppressed'
-            ? ' <span style="font-size:.6rem;color:var(--gold);border:1px solid var(--gold);padding:1px 4px;border-radius:3px">STŁUMIONY</span>'
+          const biasTag = bestSig.dir_bias === 'minority'
+            ? ' <span style="font-size:.6rem;color:var(--text-muted);border:1px solid var(--text-muted);padding:1px 4px;border-radius:3px">vs trend</span>'
             : bestSig.conflicted
-            ? ' <span style="font-size:.6rem;color:var(--gold);border:1px solid var(--gold);padding:1px 4px;border-radius:3px">KONFLIKT</span>'
+            ? ' <span style="font-size:.6rem;color:var(--gold);border:1px solid var(--gold);padding:1px 4px;border-radius:3px">SPLIT</span>'
             : '';
           return `<div style="background:var(--bg-card);border:1px solid var(--border);border-left:3px solid ${bColor};border-radius:var(--radius);padding:14px 20px;min-width:260px">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
             <span style="font-size:.7rem;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted)">🔥 Best Signal</span>
             <span style="font-family:'JetBrains Mono',monospace;font-size:.68rem;color:var(--text-muted)">⏱ ${originStr} · ${ageStr}</span>
           </div>
-          <div style="font-size:1rem;font-weight:800">${bestSig.name} <span style="color:${bColor};font-size:.8rem">${bDir.toUpperCase()}</span>${tierTag}${gradeTag}${suppressTag}
+          <div style="font-size:1rem;font-weight:800">${bestSig.name} <span style="color:${bColor};font-size:.8rem">${bDir.toUpperCase()}</span>${tierTag}${gradeTag}${biasTag}
             <span style="font-size:.65rem;padding:2px 6px;border-radius:3px;margin-left:6px;background:${
               {Fast:'rgba(16,185,129,.15)',Quick:'rgba(6,182,212,.15)',Medium:'rgba(245,158,11,.15)',Slow:'rgba(239,68,68,.15)'}[bestSig.speed_label||'Medium']||'rgba(100,116,139,.15)'
             };color:${
