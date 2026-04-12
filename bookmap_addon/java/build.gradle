@@ -1,0 +1,28 @@
+plugins {
+    id 'java'
+}
+
+group = 'com.wizjoner'
+version = '1.0'
+
+repositories {
+    mavenCentral()
+    // Bookmap API repo
+    maven { url 'https://maven.bookmap.com/maven2/releases/' }
+}
+
+dependencies {
+    compileOnly 'com.bookmap.api:api-simplified:7.4.0.2'
+    compileOnly 'com.bookmap.api:api-core:7.4.0.2'
+}
+
+jar {
+    archiveBaseName = 'wizjoner-bridge'
+    from { configurations.compileClasspath.collect { it.isDirectory() ? it : zipTree(it) } }
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_11
+    targetCompatibility = JavaVersion.VERSION_11
+}
