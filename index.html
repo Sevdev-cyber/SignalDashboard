@@ -273,6 +273,10 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg-primary);color
 .guide-l2-title{font-size:.7rem;text-transform:uppercase;color:var(--text-muted);margin-bottom:4px}
 .guide-l2-main{font-size:.75rem;font-weight:700;color:var(--text-primary);margin-bottom:3px}
 .guide-l2-sub{font-size:.68rem;line-height:1.35;color:var(--text-muted)}
+.compact-hide{display:none !important}
+.guide-grid{display:none}
+.guide-zone-list{display:none}
+.guide-l2{display:none}
 
 /* ─── Zones ─── */
 .zones-box{background:var(--bg-card);border-radius:var(--radius);padding:14px;border:1px solid var(--border)}
@@ -430,7 +434,7 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg-primary);color
     </div>
 
     <!-- Weighted Zones -->
-    <div class="zones-box" id="zonesBox">
+    <div class="zones-box compact-hide" id="zonesBox">
       <div class="section-title">🎯 Weighted Zones</div>
       <div id="zonesContent" class="zones-content">
         <div class="zones-empty">No signals</div>
@@ -438,13 +442,13 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg-primary);color
     </div>
 
     <!-- Auto verdict -->
-    <div class="verdict-box" id="verdictBox">
+    <div class="verdict-box compact-hide" id="verdictBox">
       <div class="verdict-title">🧠 Co to znaczy?</div>
       <div class="verdict-text" id="verdictText">Ładowanie…</div>
     </div>
 
     <!-- History -->
-    <div>
+    <div class="compact-hide">
       <div class="section-title">Signal History <span class="count" id="historyCount">0</span></div>
       <div class="history-list" id="historyList">
         <div class="empty-state" style="padding:20px">
@@ -1361,21 +1365,16 @@ function updateGuide(guide) {
     }
 
     const guideZones = Array.isArray(normalized.zones) ? normalized.zones : [];
-    if (!guideZones.length) {
-      zones.innerHTML = '<div class="guide-empty">No probable zones yet.</div>';
-      renderGuideHud(normalized);
-      return;
-    }
-    zones.innerHTML = guideZones.map(z => `
-      <div class="guide-zone-item ${z.direction || 'neutral'} ${z.stage || ''}">
+    const topZone = guideZones[0] || normalized.best_long_zone || normalized.best_short_zone || null;
+    zones.innerHTML = topZone ? `
+      <div class="guide-zone-item ${topZone.direction || normalized.display_overall_bias || 'neutral'} ${topZone.stage || ''}">
         <div class="guide-zone-top">
-          <div class="guide-zone-label">${z.label || 'Zone'}</div>
-          ${z.stage ? `<div class="guide-zone-stage ${z.stage}">${z.stage}</div>` : ''}
-          <div class="guide-zone-range">${Number(z.low).toFixed(2)} - ${Number(z.high).toFixed(2)}</div>
+          <div class="guide-zone-label">${topZone.label || 'Primary zone'}</div>
+          <div class="guide-zone-range">${Number(topZone.low).toFixed(2)} - ${Number(topZone.high).toFixed(2)}</div>
         </div>
-        <div class="guide-zone-why">${z.why || ''}${z.trigger ? ` Trigger ${Number(z.trigger).toFixed(2)}.` : ''}</div>
+        <div class="guide-zone-why">${topZone.why || ''}${topZone.trigger ? ` Trigger ${Number(topZone.trigger).toFixed(2)}.` : ''}</div>
       </div>
-    `).join('');
+    ` : '<div class="guide-empty">No primary zone yet.</div>';
     renderGuideHud(normalized);
   } catch (err) {
     console.error('updateGuide failed:', err);

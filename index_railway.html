@@ -273,6 +273,10 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg-primary);color
 .guide-l2-title{font-size:.7rem;text-transform:uppercase;color:var(--text-muted);margin-bottom:4px}
 .guide-l2-main{font-size:.75rem;font-weight:700;color:var(--text-primary);margin-bottom:3px}
 .guide-l2-sub{font-size:.68rem;line-height:1.35;color:var(--text-muted)}
+.compact-hide{display:none !important}
+.guide-grid{display:none}
+.guide-zone-list{display:none}
+.guide-l2{display:none}
 
 /* ─── Zones ─── */
 .zones-box{background:var(--bg-card);border-radius:var(--radius);padding:14px;border:1px solid var(--border)}
@@ -433,7 +437,7 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg-primary);color
     </div>
 
     <!-- Weighted Zones -->
-    <div class="zones-box" id="zonesBox">
+    <div class="zones-box compact-hide" id="zonesBox">
       <div class="section-title">🎯 Weighted Zones</div>
       <div id="zonesContent" class="zones-content">
         <div class="zones-empty">No signals</div>
@@ -441,13 +445,13 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg-primary);color
     </div>
 
     <!-- Auto verdict -->
-    <div class="verdict-box" id="verdictBox">
+    <div class="verdict-box compact-hide" id="verdictBox">
       <div class="verdict-title">🧠 Co to znaczy?</div>
       <div class="verdict-text" id="verdictText">Ładowanie…</div>
     </div>
 
     <!-- History -->
-    <div>
+    <div class="compact-hide">
       <div class="section-title">Signal History <span class="count" id="historyCount">0</span></div>
       <div class="history-list" id="historyList">
         <div class="empty-state" style="padding:20px">
@@ -1616,176 +1620,49 @@ function updateSignals(signals, resolved, ghostSignals) {
   } else {
     const longs = signals.filter(s => s.direction === 'long');
     const shorts = signals.filter(s => s.direction === 'short');
-    // Sort by confidence for best signal pick (not distance — confidence is what matters)
     const bySig = [...signals].sort((a,b) => (b.confidence_pct||0) - (a.confidence_pct||0));
     const bestSig = bySig[0];
     const bestConf = bestSig ? bestSig.confidence_pct : 0;
-
-    // Direction conflict detection
-    const hasConflict = bestSig && bestSig.conflicted;
-    const longConf = longs.reduce((s,x) => s + x.confidence_pct, 0);
-    const shortConf = shorts.reduce((s,x) => s + x.confidence_pct, 0);
-    const totalConf = longConf + shortConf || 1;
-    const longBias = Math.round(longConf / totalConf * 100);
-    const shortBias = 100 - longBias;
-    const rawBiasDir = longBias > shortBias ? 'long' : shortBias > longBias ? 'short' : 'neutral';
-    const rawBiasPct = Math.max(longBias, shortBias);
-    if (rawBiasDir === stableSignalBias.bias || rawBiasDir === 'neutral') {
-      stableSignalBias.candidate = null;
-      stableSignalBias.candidateCount = 0;
-    } else if (stableSignalBias.candidate === rawBiasDir) {
-      stableSignalBias.candidateCount += 1;
-    } else {
-      stableSignalBias.candidate = rawBiasDir;
-      stableSignalBias.candidateCount = 1;
-    }
-    if (
-      rawBiasDir !== 'neutral' &&
-      (stableSignalBias.bias === 'neutral' ||
-        rawBiasPct >= stableSignalBias.pct + 12 ||
-        (stableSignalBias.candidateCount >= 2 && rawBiasPct >= Math.max(58, stableSignalBias.pct - 5)))
-    ) {
-      stableSignalBias.bias = rawBiasDir;
-      stableSignalBias.candidate = null;
-      stableSignalBias.candidateCount = 0;
-    }
-    stableSignalBias.pct = stableSignalBias.pct
-      ? Math.round(stableSignalBias.pct * 0.7 + rawBiasPct * 0.3)
-      : rawBiasPct;
-    const biasDir = stableSignalBias.bias === 'neutral' ? rawBiasDir : stableSignalBias.bias;
-    const displayBiasPct = Math.max(50, stableSignalBias.pct || rawBiasPct);
-    const biasColor = biasDir === 'long' ? 'var(--long)' : 'var(--short)';
-    const biasArrow = biasDir === 'long' ? '▲' : '▼';
-
-    // Conflict / bias indicator
-    let biasHTML = '';
-    if (longs.length > 0 && shorts.length > 0) {
-      if (hasConflict) {
-        biasHTML = `<div style="background:rgba(245,158,11,.12);border:1px solid var(--gold);border-radius:var(--radius-sm);padding:6px 12px;font-size:.75rem;color:var(--gold);font-weight:600">
-          ⚖️ KONFLIKT — LONG ${longBias}% vs SHORT ${shortBias}% — czekaj na rozstrzygnięcie
-        </div>`;
-      } else {
-        biasHTML = `<div style="background:rgba(59,130,246,.08);border:1px solid var(--border);border-radius:var(--radius-sm);padding:6px 12px;font-size:.75rem">
-          ${biasArrow} <span style="color:${biasColor};font-weight:700">${biasDir.toUpperCase()} BIAS ${displayBiasPct}%</span>
-          <span style="color:var(--text-muted);margin-left:8px">• raw ${rawBiasDir.toUpperCase()} ${rawBiasPct}% • wygładzone</span>
-        </div>`;
-      }
-    }
-
+    const bDir = bestSig.direction;
+    const bColor = bDir === 'long' ? 'var(--long)' : 'var(--short)';
+    const entryDist = p ? Math.abs(bestSig.entry - p).toFixed(1) : '—';
+    const inZoneNow = p ? (bDir === 'long' ? p <= bestSig.entry : p >= bestSig.entry) : false;
+    const filled = bestSig.entry_touched === true;
+    const confluenceCount = bestSig.confluence_count || bestSig.same_dir_family_count || 1;
+    const triggerText = filled ? 'filled' : inZoneNow ? 'entry now' : `${entryDist} pts away`;
     topEl.innerHTML = `
-      <div style="display:flex;gap:12px;flex-wrap:wrap;align-items:center">
-        <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:14px 20px;flex:1;min-width:200px">
-          <div style="font-size:.7rem;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted);margin-bottom:6px">📍 Predictions on Chart</div>
-          <div style="display:flex;gap:16px;align-items:center;font-family:'JetBrains Mono',monospace">
-            <span style="font-size:1.8rem;font-weight:900;color:var(--text-primary)">${signals.length}</span>
-            <div style="font-size:.8rem;line-height:1.6">
-              <div><span style="color:var(--long);font-weight:700">▲ ${longs.length}</span> long</div>
-              <div><span style="color:var(--short);font-weight:700">▼ ${shorts.length}</span> short</div>
-            </div>
-            <div style="font-size:.75rem;line-height:1.5;padding:6px 10px;border-radius:8px;background:rgba(245,158,11,.10);border:1px solid rgba(245,158,11,.25);color:var(--gold)">
-              <div><strong>${sameDirAligned}</strong> strong clusters</div>
-              <div style="color:var(--text-muted)">3x+ aligned now</div>
-            </div>
-            <div style="margin-left:auto;text-align:right;font-size:.75rem;color:var(--text-muted)">
-              <div><span style="color:#06b6d4">●</span> TP target</div>
-              <div><span style="color:#ef4444">●</span> SL level</div>
-            </div>
-          </div>
-          ${biasHTML}
+      <div style="display:grid;gap:10px">
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <span class="decision-chip ${longs.length ? 'good' : 'warn'}">long ${longs.length}</span>
+          <span class="decision-chip ${shorts.length ? 'bad' : 'warn'}">short ${shorts.length}</span>
+          <span class="decision-chip ${sameDirAligned >= 1 ? 'good' : 'warn'}">${sameDirAligned} strong cluster</span>
+          <span class="decision-chip">${signals.length} total</span>
         </div>
-        ${bestSig ? (() => {
-          const bDir = bestSig.direction;
-          const bColor = bDir === 'long' ? 'var(--long)' : 'var(--short)';
-          const originStr = bestSig.origin_time ? new Date(bestSig.origin_time * 1000).toLocaleTimeString() : '—';
-          const ageMin = bestSig.origin_time ? Math.round((Date.now()/1000 - bestSig.origin_time) / 60) : 0;
-          const ageStr = ageMin < 60 ? `${ageMin}m ago` : `${Math.floor(ageMin/60)}h ${ageMin%60}m ago`;
-          const entryDist = p ? Math.abs(bestSig.entry - p).toFixed(1) : '—';
-          const inZoneNow = p ? (bDir === 'long' ? p <= bestSig.entry : p >= bestSig.entry) : false;
-          const wasFilled = bestSig.entry_touched === true;
-          let entryStatus;
-          if (wasFilled) {
-            entryStatus = '<span style="color:var(--long);font-weight:700">✓ FILLED</span>';
-          } else if (inZoneNow) {
-            entryStatus = '<span style="color:var(--gold);font-weight:700;animation:pulse 1s infinite">● ENTRY NOW</span>';
-          } else {
-            entryStatus = `<span style="color:var(--text-muted)">${entryDist} pts away</span>`;
-          }
-          const gradeColors = {'A+':'#10b981','A':'#06b6d4','B':'#94a3b8','C':'#f59e0b','D':'#ef4444'};
-          const grade = bestSig.quality_grade || 'B';
-          const tier = bestSig.tier_label || '';
-          const confluenceCount = bestSig.confluence_count || bestSig.same_dir_family_count || 1;
-          const confluenceTag = confluenceCount >= 2
-            ? ` <span style="font-size:.6rem;font-weight:800;padding:1px 5px;border-radius:3px;background:rgba(245,158,11,.18);color:var(--gold);border:1px solid rgba(245,158,11,.35);letter-spacing:.4px">${confluenceCount}x aligned</span>`
-            : '';
-          const tierColors = {'GOLD':'#f59e0b','SILVER':'#94a3b8'};
-          const tierTag = tier ? ` <span style="font-size:.6rem;font-weight:800;padding:1px 5px;border-radius:3px;background:${tierColors[tier]}22;color:${tierColors[tier]};border:1px solid ${tierColors[tier]};letter-spacing:.5px">${tier === 'GOLD' ? '★ ' : ''}${tier}</span>` : '';
-          const gradeTag = ` <span style="font-size:.6rem;font-weight:700;padding:1px 5px;border-radius:3px;background:${gradeColors[grade]||'#64748b'}22;color:${gradeColors[grade]||'#64748b'};border:1px solid ${gradeColors[grade]||'#64748b'}">${grade}</span>`;
-          const biasTag = bestSig.dir_bias === 'minority'
-            ? ' <span style="font-size:.6rem;color:var(--text-muted);border:1px solid var(--text-muted);padding:1px 4px;border-radius:3px">vs trend</span>'
-            : bestSig.conflicted
-            ? ' <span style="font-size:.6rem;color:var(--gold);border:1px solid var(--gold);padding:1px 4px;border-radius:3px">SPLIT</span>'
-            : '';
-          return `<div style="background:var(--bg-card);border:1px solid var(--border);border-left:3px solid ${bColor};border-radius:var(--radius);padding:14px 20px;min-width:260px">
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
-            <span style="font-size:.7rem;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted)">🔥 Best Signal</span>
-            <span style="font-family:'JetBrains Mono',monospace;font-size:.68rem;color:var(--text-muted)">⏱ ${originStr} · ${ageStr}</span>
+        <div style="background:var(--bg-card);border:1px solid var(--border);border-left:4px solid ${bColor};border-radius:var(--radius);padding:16px 18px">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:8px">
+            <div style="font-size:.72rem;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted)">Primary Setup</div>
+            <div style="font-family:'JetBrains Mono',monospace;font-size:1.2rem;font-weight:900;color:${bColor}">${bestConf}%</div>
           </div>
-          <div style="font-size:1rem;font-weight:800">${bestSig.name} <span style="color:${bColor};font-size:.8rem">${bDir.toUpperCase()}</span>${confluenceTag}${tierTag}${gradeTag}${biasTag}
-            <span style="font-size:.65rem;padding:2px 6px;border-radius:3px;margin-left:6px;background:${
-              {Fast:'rgba(16,185,129,.15)',Quick:'rgba(6,182,212,.15)',Medium:'rgba(245,158,11,.15)',Slow:'rgba(239,68,68,.15)'}[bestSig.speed_label||'Medium']||'rgba(100,116,139,.15)'
-            };color:${
-              {Fast:'#10b981',Quick:'#06b6d4',Medium:'#f59e0b',Slow:'#ef4444','Very Slow':'#dc2626'}[bestSig.speed_label||'Medium']||'#94a3b8'
-            }">${bestSig.speed_label||'Medium'} ~${bestSig.optimal_min||20}min hold</span>
+          <div style="font-size:1.05rem;font-weight:800;color:var(--text-primary)">
+            ${bestSig.name} <span style="color:${bColor};font-size:.82rem">${bDir.toUpperCase()}</span>
           </div>
-          <div style="font-family:'JetBrains Mono',monospace;font-size:.78rem;margin-top:4px;color:var(--text-secondary)">
-            Entry ${bestSig.entry?.toFixed(2)} → <span style="color:var(--long)">TP ${bestSig.tp1?.toFixed(2)}</span> · <span style="color:var(--short)">SL ${bestSig.invalidation?.toFixed(2)}</span>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+            <span class="decision-chip">entry ${bestSig.entry?.toFixed(2)}</span>
+            <span class="decision-chip good">tp ${bestSig.tp1?.toFixed(2)}</span>
+            <span class="decision-chip bad">sl ${(bestSig.invalidation ?? bestSig.sl)?.toFixed(2)}</span>
+            <span class="decision-chip">${triggerText}</span>
+            <span class="decision-chip">${confluenceCount}x aligned</span>
           </div>
-          <div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px">
-            <div style="font-family:'JetBrains Mono',monospace;font-size:1.4rem;font-weight:900;color:${confClass(bestConf) === 'high' ? 'var(--long)' : confClass(bestConf) === 'medium' ? 'var(--gold)' : 'var(--short)'}">${bestConf}%</div>
-            <div style="font-size:.75rem">${entryStatus}</div>
+          <div style="margin-top:8px;font-size:.74rem;line-height:1.45;color:var(--text-secondary)">
+            ${bestSig.reasons && bestSig.reasons.length ? bestSig.reasons.slice(0, 3).join(' · ') : 'No extra context.'}
           </div>
-        </div>`;
-        })() : ''}
-      </div>
-      ${signals.length > 1 ? (() => {
-        // ── EXECUTION QUEUE: timeline of signals sorted by expected completion ──
-        const sorted = [...signals].sort((a, b) => {
-          const aEta = (a.origin_time || 0) + (a.bars_to_tp || 10) * 300;
-          const bEta = (b.origin_time || 0) + (b.bars_to_tp || 10) * 300;
-          return aEta - bEta;
-        });
-        const queueItems = sorted.slice(0, 8).map((s, i) => {
-          const dir = s.direction === 'long';
-          const color = dir ? 'var(--long)' : 'var(--short)';
-          const arrow = dir ? '▲' : '▼';
-          const tierBadge = s.tier_label === 'GOLD' ? '★' : s.tier_label === 'SILVER' ? '◆' : '';
-          const aligned = s.confluence_count || s.same_dir_family_count || 1;
-          const filled = s.entry_touched ? '✓' : '○';
-          const filledColor = s.entry_touched ? 'var(--long)' : 'var(--text-muted)';
-          const eta = s.bars_to_tp || '?';
-          const gradeC = {'A+':'#10b981','A':'#06b6d4','B':'#94a3b8','C':'#f59e0b','D':'#ef4444'}[s.quality_grade||'B']||'#64748b';
-          return `<div style="display:flex;align-items:center;gap:6px;padding:3px 8px;background:var(--bg-card);border-radius:6px;border:1px solid var(--border);font-size:.7rem;font-family:'JetBrains Mono',monospace;white-space:nowrap">
-            <span style="color:${color};font-weight:900;font-size:.85rem;width:16px;text-align:center">${i+1}</span>
-            <span style="color:${color}">${arrow}</span>
-            <span style="color:var(--text-primary);font-weight:600">${s.name}</span>
-            <span style="color:${gradeC};font-size:.6rem;font-weight:700">${s.quality_grade||''}</span>
-            ${tierBadge ? `<span style="color:#f59e0b;font-size:.65rem">${tierBadge}</span>` : ''}
-            ${aligned >= 2 ? `<span style="color:var(--gold);font-size:.6rem;font-weight:700">${aligned}x</span>` : ''}
-            <span style="color:${filledColor};font-size:.75rem">${filled}</span>
-            <span style="color:var(--text-muted);font-size:.6rem">~${eta}b</span>
-          </div>`;
-        }).join('');
-        return `<div style="margin-top:8px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px 12px">
-          <div style="font-size:.6rem;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted);margin-bottom:5px">⏱ Execution Queue — fastest first</div>
-          <div style="display:flex;gap:4px;flex-wrap:wrap">${queueItems}</div>
-        </div>`;
-      })() : ''}`;
+        </div>
+      </div>`;
   }
 
   // Hide rest toggle (all signals are dots now)
   $('restToggle').style.display = 'none';
 
-  // Verdict
   buildVerdict(top, signals);
 }
 
@@ -2186,22 +2063,16 @@ function updateGuide(guide) {
     }
 
     const guideZones = Array.isArray(normalized.zones) ? normalized.zones : [];
-    if (!guideZones.length) {
-      zones.innerHTML = '<div class="guide-empty">No probable zones yet.</div>';
-      renderGuideHud(normalized);
-      renderPredSVG();
-      return;
-    }
-    zones.innerHTML = guideZones.map(z => `
-      <div class="guide-zone-item ${z.direction || 'neutral'} ${z.stage || ''}">
+    const topZone = guideZones[0] || normalized.best_long_zone || normalized.best_short_zone || null;
+    zones.innerHTML = topZone ? `
+      <div class="guide-zone-item ${topZone.direction || normalized.display_overall_bias || 'neutral'} ${topZone.stage || ''}">
         <div class="guide-zone-top">
-          <div class="guide-zone-label">${z.label || 'Zone'}</div>
-          ${z.stage ? `<div class="guide-zone-stage ${z.stage}">${z.stage}</div>` : ''}
-          <div class="guide-zone-range">${Number(z.low).toFixed(2)} - ${Number(z.high).toFixed(2)}</div>
+          <div class="guide-zone-label">${topZone.label || 'Primary zone'}</div>
+          <div class="guide-zone-range">${Number(topZone.low).toFixed(2)} - ${Number(topZone.high).toFixed(2)}</div>
         </div>
-        <div class="guide-zone-why">${z.why || ''}${z.trigger ? ` Trigger ${Number(z.trigger).toFixed(2)}.` : ''}</div>
+        <div class="guide-zone-why">${topZone.why || ''}${topZone.trigger ? ` Trigger ${Number(topZone.trigger).toFixed(2)}.` : ''}</div>
       </div>
-    `).join('');
+    ` : '<div class="guide-empty">No primary zone yet.</div>';
     renderGuideHud(normalized);
     renderPredSVG();
   } catch (err) {
