@@ -484,7 +484,7 @@ function connect() {
     try {
       const d = JSON.parse(e.data);
       if (d.bars && d.bars.length > 0) updateChartHistory(d.bars);
-      if (d.signals) updateSignals(d.signals, d.resolved || []);
+      if (d.signals || d.ghost_signals) updateSignals(d.signals || [], d.resolved || [], d.ghost_signals || []);
       if (d.history) updateHistory(d.history);
       if (d.state) {
         updateState(d.state);
@@ -626,9 +626,10 @@ function updateChartTick(s) {
 // ═══ PREDICTIONS ═══
 var predLines = [];
 var predSignals = [];
+var predGhostSignals = [];
 var predAtr = 20;
 
-function updatePredictions(signals, atr) {
+function updatePredictions(signals, atr, ghostSignals) {
   if (!candleSeries) return;
 
   // Remove old price lines (top 3 only)
@@ -636,9 +637,10 @@ function updatePredictions(signals, atr) {
   predLines = [];
 
   predSignals = signals || [];
+  predGhostSignals = ghostSignals || [];
   predAtr = atr || 20;
 
-  if (predSignals.length === 0) { renderPredSVG(); return; }
+  if (predSignals.length === 0 && predGhostSignals.length === 0) { renderPredSVG(); return; }
 
   // Sort by confidence
   predSignals.sort((a,b) => (b.confidence_pct||0) - (a.confidence_pct||0));
@@ -703,6 +705,75 @@ function renderPredSVG() {
   });
   const execOrderMap = {};
   byExecOrder.forEach((sig, i) => { execOrderMap[sig.id] = i + 1; });
+
+  predGhostSignals.forEach((sig) => {
+    const tp = sig.tp1;
+    const sl = sig.invalidation || sig.sl;
+    const entry = sig.entry;
+    if (!tp || !sl || !entry) return;
+
+    const originTime = sig.origin_time || lastBarTime;
+    const oX = chart.timeScale().timeToCoordinate(originTime);
+    const oY = candleSeries.priceToCoordinate(entry);
+    if (oX == null || oY == null) return;
+
+    function futureX(t) {
+      const x = chart.timeScale().timeToCoordinate(t);
+      if (x != null) return x;
+      if (lastBarX != null && pxPerBar > 0) {
+        const barsAhead = (t - lastBarTime) / barSecs;
+        return lastBarX + barsAhead * pxPerBar;
+      }
+      return null;
+    }
+
+    const barsToTp = sig.bars_to_tp || 10;
+    const tpTime = originTime + barsToTp * barSecs;
+    const tpX = futureX(tpTime);
+    const tpY = candleSeries.priceToCoordinate(tp);
+    const barsToSl = Math.max(2, Math.round(barsToTp * 0.4));
+    const slTime = originTime + barsToSl * barSecs;
+    const slX = futureX(slTime);
+    const slY = candleSeries.priceToCoordinate(sl);
+    const ghostColor = 'rgba(148,163,184,0.75)';
+
+    predOverlay.appendChild(svgEl('circle', {
+      cx: oX, cy: oY, r: 3,
+      fill: 'transparent',
+      stroke: ghostColor,
+      'stroke-width': 1.2,
+      opacity: 0.65
+    }));
+
+    if (tpX != null && tpY != null) {
+      predOverlay.appendChild(svgEl('line', {
+        x1: oX, y1: oY, x2: tpX, y2: tpY,
+        stroke: ghostColor, 'stroke-width': 0.8,
+        'stroke-dasharray': '3,4', opacity: 0.35
+      }));
+      predOverlay.appendChild(svgEl('circle', {
+        cx: tpX, cy: tpY, r: 2.5,
+        fill: ghostColor, opacity: 0.35
+      }));
+    }
+
+    if (slX != null && slY != null) {
+      predOverlay.appendChild(svgEl('line', {
+        x1: oX, y1: oY, x2: slX, y2: slY,
+        stroke: ghostColor, 'stroke-width': 0.8,
+        'stroke-dasharray': '3,4', opacity: 0.25
+      }));
+    }
+
+    const ghostLabel = svgEl('text', {
+      x: oX + 6, y: oY - 5,
+      fill: '#94a3b8', 'font-size': 7,
+      'font-family': 'JetBrains Mono, monospace',
+      'font-weight': 500, opacity: 0.5
+    });
+    ghostLabel.textContent = `${sig.name || 'FILTERED'} ghost`;
+    predOverlay.appendChild(ghostLabel);
+  });
 
   predSignals.forEach((sig, idx) => {
     const tp = sig.tp1;
@@ -1304,9 +1375,10 @@ function snapToBar(ts) {
 }
 
 var _lastSignalHash = '';
-function updateSignals(signals, resolved) {
+function updateSignals(signals, resolved, ghostSignals) {
   if (!signals) signals = [];
   if (!resolved) resolved = [];
+  if (!ghostSignals) ghostSignals = [];
 
   // Sort by confidence (highest first) — consistent with dots, labels, best signal
   const p = lastPrice || 0;
@@ -1320,12 +1392,13 @@ function updateSignals(signals, resolved) {
   // Always update SVG positions (cheap), but only rebuild DOM cards when structure changes
   if (!structureChanged) {
     // Just reposition SVG overlay (price coordinates may have shifted)
-    updatePredictions(signals, lastAtr);
+    updatePredictions(signals, lastAtr, ghostSignals);
     return;
   }
 
   const top = signals.slice(0, TOP_N);
   const rest = signals.slice(TOP_N);
+  const sameDirAligned = signals.filter(s => (s.confluence_count || s.same_dir_family_count || 1) >= 3).length;
 
   txt('topCount', top.length);
   txt('statSignals', top.length);
@@ -1338,7 +1411,7 @@ function updateSignals(signals, resolved) {
   }
 
   // ALL signals → SVG prediction dots (entry, TP, SL) on chart
-  updatePredictions(signals, lastAtr);
+  updatePredictions(signals, lastAtr, ghostSignals);
 
   // All signals shown as prediction dots — compact summary instead of cards
   const topEl = $('topSignals');
@@ -1413,6 +1486,10 @@ function updateSignals(signals, resolved) {
               <div><span style="color:var(--long);font-weight:700">▲ ${longs.length}</span> long</div>
               <div><span style="color:var(--short);font-weight:700">▼ ${shorts.length}</span> short</div>
             </div>
+            <div style="font-size:.75rem;line-height:1.5;padding:6px 10px;border-radius:8px;background:rgba(245,158,11,.10);border:1px solid rgba(245,158,11,.25);color:var(--gold)">
+              <div><strong>${sameDirAligned}</strong> strong clusters</div>
+              <div style="color:var(--text-muted)">3x+ aligned now</div>
+            </div>
             <div style="margin-left:auto;text-align:right;font-size:.75rem;color:var(--text-muted)">
               <div><span style="color:#06b6d4">●</span> TP target</div>
               <div><span style="color:#ef4444">●</span> SL level</div>
@@ -1440,6 +1517,10 @@ function updateSignals(signals, resolved) {
           const gradeColors = {'A+':'#10b981','A':'#06b6d4','B':'#94a3b8','C':'#f59e0b','D':'#ef4444'};
           const grade = bestSig.quality_grade || 'B';
           const tier = bestSig.tier_label || '';
+          const confluenceCount = bestSig.confluence_count || bestSig.same_dir_family_count || 1;
+          const confluenceTag = confluenceCount >= 2
+            ? ` <span style="font-size:.6rem;font-weight:800;padding:1px 5px;border-radius:3px;background:rgba(245,158,11,.18);color:var(--gold);border:1px solid rgba(245,158,11,.35);letter-spacing:.4px">${confluenceCount}x aligned</span>`
+            : '';
           const tierColors = {'GOLD':'#f59e0b','SILVER':'#94a3b8'};
           const tierTag = tier ? ` <span style="font-size:.6rem;font-weight:800;padding:1px 5px;border-radius:3px;background:${tierColors[tier]}22;color:${tierColors[tier]};border:1px solid ${tierColors[tier]};letter-spacing:.5px">${tier === 'GOLD' ? '★ ' : ''}${tier}</span>` : '';
           const gradeTag = ` <span style="font-size:.6rem;font-weight:700;padding:1px 5px;border-radius:3px;background:${gradeColors[grade]||'#64748b'}22;color:${gradeColors[grade]||'#64748b'};border:1px solid ${gradeColors[grade]||'#64748b'}">${grade}</span>`;
@@ -1453,7 +1534,7 @@ function updateSignals(signals, resolved) {
             <span style="font-size:.7rem;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted)">🔥 Best Signal</span>
             <span style="font-family:'JetBrains Mono',monospace;font-size:.68rem;color:var(--text-muted)">⏱ ${originStr} · ${ageStr}</span>
           </div>
-          <div style="font-size:1rem;font-weight:800">${bestSig.name} <span style="color:${bColor};font-size:.8rem">${bDir.toUpperCase()}</span>${tierTag}${gradeTag}${biasTag}
+          <div style="font-size:1rem;font-weight:800">${bestSig.name} <span style="color:${bColor};font-size:.8rem">${bDir.toUpperCase()}</span>${confluenceTag}${tierTag}${gradeTag}${biasTag}
             <span style="font-size:.65rem;padding:2px 6px;border-radius:3px;margin-left:6px;background:${
               {Fast:'rgba(16,185,129,.15)',Quick:'rgba(6,182,212,.15)',Medium:'rgba(245,158,11,.15)',Slow:'rgba(239,68,68,.15)'}[bestSig.speed_label||'Medium']||'rgba(100,116,139,.15)'
             };color:${
@@ -1482,6 +1563,7 @@ function updateSignals(signals, resolved) {
           const color = dir ? 'var(--long)' : 'var(--short)';
           const arrow = dir ? '▲' : '▼';
           const tierBadge = s.tier_label === 'GOLD' ? '★' : s.tier_label === 'SILVER' ? '◆' : '';
+          const aligned = s.confluence_count || s.same_dir_family_count || 1;
           const filled = s.entry_touched ? '✓' : '○';
           const filledColor = s.entry_touched ? 'var(--long)' : 'var(--text-muted)';
           const eta = s.bars_to_tp || '?';
@@ -1492,6 +1574,7 @@ function updateSignals(signals, resolved) {
             <span style="color:var(--text-primary);font-weight:600">${s.name}</span>
             <span style="color:${gradeC};font-size:.6rem;font-weight:700">${s.quality_grade||''}</span>
             ${tierBadge ? `<span style="color:#f59e0b;font-size:.65rem">${tierBadge}</span>` : ''}
+            ${aligned >= 2 ? `<span style="color:var(--gold);font-size:.6rem;font-weight:700">${aligned}x</span>` : ''}
             <span style="color:${filledColor};font-size:.75rem">${filled}</span>
             <span style="color:var(--text-muted);font-size:.6rem">~${eta}b</span>
           </div>`;

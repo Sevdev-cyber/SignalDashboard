@@ -89,6 +89,8 @@ class SignalDashboardServer:
         self.resolved_signals: list[dict] = []  # signals that hit TP/SL (kept for chart markers)
         self._latest_state: dict = {}
         self._latest_signals: list[dict] = []
+        self._latest_ghost_signals: list[dict] = []
+        self._latest_engine_debug: dict = {}
         self._latest_zones: dict = {}
         self._recent_ticks = deque(maxlen=1200)
         self._l2_display_state = {
@@ -140,6 +142,7 @@ class SignalDashboardServer:
                     "type": "full_update",
                     "state": self._latest_state,
                     "signals": self._latest_signals,
+                    "ghost_signals": self._latest_ghost_signals,
                     "resolved": self.resolved_signals,
                     "zones": self._latest_zones,
                     "history": self.engine.get_history(),
@@ -151,6 +154,7 @@ class SignalDashboardServer:
                         "type": "full_update",
                         "state": self._latest_state,
                         "signals": self._latest_signals,
+                        "ghost_signals": self._latest_ghost_signals,
                         "resolved": self.resolved_signals,
                         "zones": self._latest_zones,
                         "history": self.engine.get_history(),
@@ -412,6 +416,8 @@ class SignalDashboardServer:
             bar_delta_pct=self._bar_delta_pct,
             current_price=self.current_price,
         )
+        ghost_signals = self.engine.get_ghost_signals() if hasattr(self.engine, "get_ghost_signals") else []
+        engine_debug = self.engine.get_debug_info() if hasattr(self.engine, "get_debug_info") else {}
 
         now_ts = int(time.time() * 1000)
         price = self.current_price
@@ -530,6 +536,7 @@ class SignalDashboardServer:
             current_price=self.current_price,
             bar_delta_pct=self._bar_delta_pct,
         )
+        state["engine_debug"] = engine_debug
         self._inject_l2_guide(state)
 
         # Convert dictionary to descending sorted list for broadcast
@@ -540,6 +547,8 @@ class SignalDashboardServer:
 
         self._latest_state = state
         self._latest_signals = signals_payload
+        self._latest_ghost_signals = ghost_signals
+        self._latest_engine_debug = engine_debug
         self._latest_zones = zones
 
         # Extract recent candlestick history for TradingView chart
@@ -570,6 +579,7 @@ class SignalDashboardServer:
             "type": "full_update",
             "state": state,
             "signals": signals_payload,
+            "ghost_signals": ghost_signals,
             "resolved": self.resolved_signals,
             "zones": zones,
             "history": self.engine.get_history(),
@@ -598,6 +608,7 @@ class SignalDashboardServer:
             current_price=self.current_price,
             bar_delta_pct=self._bar_delta_pct,
         )
+        state["engine_debug"] = self._latest_engine_debug
         self._inject_l2_guide(state)
         self._latest_state = state
 
@@ -610,6 +621,7 @@ class SignalDashboardServer:
             "type": "tick_update",
             "state": state,
             "signals": signals_payload[:15],
+            "ghost_signals": self._latest_ghost_signals[:8],
             "resolved": self.resolved_signals[-10:],
             "zones": self._latest_zones,
         }
@@ -625,6 +637,7 @@ class SignalDashboardServer:
                     "type": "tick_update",
                     "state": state,
                     "signals": signals_payload[:10],
+                    "ghost_signals": self._latest_ghost_signals[:4],
                 }
                 asyncio.run_coroutine_threadsafe(self._relay_push(relay_tick), self.loop)
 

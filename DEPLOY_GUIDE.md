@@ -139,6 +139,11 @@ C:\Users\Administrator\Desktop\
 ├── Wizjoner.bat                       ← Uruchamia Wizjonera
 ├── 1_START_Scalper_Playback.bat       ← NT8 playback
 └── 2_START_Scalper_Live.bat           ← NT8 live
+
+C:\SignalDashboard\
+├── start_wizjoner_headless.ps1        ← Start bez okna + log do server.log
+├── stop_wizjoner_headless.ps1         ← Stop po PID
+└── tail_wizjoner_log.ps1              ← Tail logu przez PowerShell
 ```
 
 ### Wybór konta NT8
@@ -222,6 +227,29 @@ ssh Administrator@66.42.117.137 "taskkill /F /IM python.exe"
 
 # Albo jednym poleceniem (nie zawsze działa przez SSH):
 ssh Administrator@66.42.117.137 "taskkill /F /IM python.exe & timeout /t 2 & start cmd /c C:\Users\Administrator\Desktop\Wizjoner.bat"
+```
+
+### Headless start na VPS
+Najwygodniejszy tryb do zdalnej diagnostyki. Proces działa bez okna, a pełny stdout/stderr leci do `C:\SignalDashboard\server.log`.
+
+```bash
+# Start headless
+ssh Administrator@66.42.117.137 "powershell -ExecutionPolicy Bypass -File C:\SignalDashboard\start_wizjoner_headless.ps1"
+
+# Stop headless
+ssh Administrator@66.42.117.137 "powershell -ExecutionPolicy Bypass -File C:\SignalDashboard\stop_wizjoner_headless.ps1"
+
+# Podejrzyj ostatnie linie
+ssh Administrator@66.42.117.137 "powershell -ExecutionPolicy Bypass -File C:\SignalDashboard\tail_wizjoner_log.ps1 -Tail 80"
+
+# Live tail
+ssh Administrator@66.42.117.137 "powershell -ExecutionPolicy Bypass -File C:\SignalDashboard\tail_wizjoner_log.ps1 -Tail 80 -Follow"
+```
+
+Możesz też nadpisać konto / port / TF bez edycji skryptu:
+
+```bash
+ssh Administrator@66.42.117.137 "powershell -ExecutionPolicy Bypass -File C:\SignalDashboard\start_wizjoner_headless.ps1 -AccountName Sim101 -BarTfMin 1 -EngineMode final_mtf_v3 -WsPort 8082"
 ```
 
 ### Czyszczenie cache Python na VPS
