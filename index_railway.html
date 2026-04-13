@@ -383,6 +383,8 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg-primary);color
         <div class="ind" id="indVolume"><span class="ind-label">Volume</span><span class="ind-val">—</span></div>
         <div class="ind" id="indVolRatio"><span class="ind-label">Vol/Avg</span><span class="ind-val">—</span></div>
         <div class="ind" id="indVwapDist"><span class="ind-label">VWAP Dist</span><span class="ind-val">—</span></div>
+        <div class="ind" id="indFlowSource"><span class="ind-label">Flow Src</span><span class="ind-val">—</span></div>
+        <div class="ind" id="indTickCoverage"><span class="ind-label">Tick Cov</span><span class="ind-val">—</span></div>
         <div class="ind" id="indBarRange"><span class="ind-label">Bar Range</span><span class="ind-val">—</span></div>
         <div class="ind" id="indBarBody"><span class="ind-label">Body %</span><span class="ind-val">—</span></div>
         <div class="ind" id="indBarPos"><span class="ind-label">Close Pos</span><span class="ind-val">—</span></div>
@@ -1639,6 +1641,20 @@ function updateIndicators(s) {
   // VWAP dist
   setInd('indVwapDist', s.vwap_dist != null ? (s.vwap_dist >= 0 ? '+' : '') + s.vwap_dist.toFixed(1) : '—',
     s.vwap_dist > 0 ? 'bull' : s.vwap_dist < 0 ? 'bear' : '');
+
+  // Flow source / real tick coverage
+  const flowLabel = s.flow_source === 'real_ticks'
+    ? 'REAL'
+    : s.flow_source === 'mixed'
+      ? 'MIXED'
+      : s.flow_source === 'bar_fallback'
+        ? 'FALLBACK'
+        : '—';
+  setInd('indFlowSource', flowLabel,
+    s.flow_quality === 'high' ? 'bull' : s.flow_quality === 'medium' ? 'warn' : s.flow_quality === 'low' ? 'bear' : '');
+
+  setInd('indTickCoverage', s.real_tick_coverage != null ? s.real_tick_coverage + '%' : '—',
+    s.real_tick_coverage >= 80 ? 'bull' : s.real_tick_coverage >= 30 ? 'warn' : s.real_tick_coverage >= 0 ? 'bear' : '');
 
   // Bar range
   setInd('indBarRange', s.bar_range?.toFixed(1) || '—', '');

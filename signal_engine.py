@@ -702,6 +702,24 @@ class SignalEngine:
         bar_close = float(last.get("close", current_price))
         bar_open = float(last.get("open", current_price))
         bar_range = bar_high - bar_low
+        has_real_tick_delta = bool(last.get("has_real_tick_delta", False))
+
+        tick_window = bars_df.tail(min(len(bars_df), 60)).copy()
+        real_tick_coverage = 0.0
+        if "has_real_tick_delta" in tick_window.columns and len(tick_window) > 0:
+            real_tick_coverage = float(pd.to_numeric(
+                tick_window["has_real_tick_delta"], errors="coerce"
+            ).fillna(0).astype(bool).mean())
+
+        if real_tick_coverage >= 0.8:
+            flow_source = "real_ticks"
+            flow_quality = "high"
+        elif real_tick_coverage >= 0.3:
+            flow_source = "mixed"
+            flow_quality = "medium"
+        else:
+            flow_source = "bar_fallback"
+            flow_quality = "low"
 
         # Regime
         regime_info = self._get_regime(bars_df)
@@ -780,6 +798,10 @@ class SignalEngine:
             "cvd_trend": cvd_trend,
             "cvd_change": cvd_change,
             "delta_streak": delta_streak,
+            "flow_source": flow_source,
+            "flow_quality": flow_quality,
+            "real_tick_coverage": round(real_tick_coverage * 100, 0),
+            "has_real_tick_delta": has_real_tick_delta,
             # --- Volume ---
             "volume": round(volume, 0),
             "vol_avg": round(vol_avg, 0),
