@@ -12,7 +12,8 @@ indicator("MNQ Smart Zones + LLM Context", overlay=true, max_labels_count=500, m
 // 6. Session levels (NY Open, London, Asia, prev day H/L/C)
 // 7. Weekly structure (prev week H/L/mid — magnet levels)
 // 8. Market Structure (BOS / CHOCH markers)
-// 9. LLM Summary Panel (all data as readable text)
+// 9. Volume Profile / POC (Point of Control)
+// 10. LLM Summary Panel (all data as readable text)
 // ═══════════════════════════════════════════════════════════════
 
 // ── INPUTS ──
@@ -22,6 +23,13 @@ show_liquidity   = input.bool(true, "Liquidity Pools (sweep targets)", group=grp
 show_order_block = input.bool(true, "Order Blocks (supply/demand)", group=grp_zones)
 show_fvg         = input.bool(true, "Fair Value Gaps", group=grp_zones)
 show_vwap_bands  = input.bool(true, "VWAP ±1σ/±2σ Bands", group=grp_zones)
+
+grp_vol = "Volume Profile"
+show_vol_profile = input.bool(true, "Volume Profile (POC/VAH/VAL)", group=grp_vol)
+vp_lookback      = input.int(50, "VP Lookback Bars", minval=10, maxval=200, group=grp_vol)
+vp_rows          = input.int(30, "VP Price Rows", minval=10, maxval=100, group=grp_vol)
+show_vol_bars    = input.bool(true, "Volume per bar (bottom)", group=grp_vol)
+show_delta_bars  = input.bool(true, "Delta per bar (bottom)", group=grp_vol)
 
 grp_levels = "Key Levels"
 show_sessions    = input.bool(true, "Session Opens (NY/Lon/Asia)", group=grp_levels)
@@ -338,7 +346,110 @@ if show_trend
     plotchar(not trend_bull and trend_bull[1], "Trend → Bear", "▼", location.abovebar, color=color.new(#ef4444, 50), size=size.tiny)
 
 // ═══════════════════════════════════════════════════════════════
-// 9. LLM SUMMARY PANEL
+// 9. VOLUME PROFILE — POC, VAH, VAL
+// ═══════════════════════════════════════════════════════════════
+
+// Approximate Volume Profile using price bins over lookback period
+var float poc_price = na
+var float vah_price = na
+var float val_price = na
+var float session_vol_total = 0.0
+var float session_buy_vol = 0.0
+var float session_sell_vol = 0.0
+
+if show_vol_profile and bar_index >= vp_lookback
+    // Find price range over lookback
+    lookback_high = ta.highest(high, vp_lookback)
+    lookback_low = ta.lowest(low, vp_lookback)
+    price_range = lookback_high - lookback_low
+
+    if price_range > 0
+        row_size = price_range / vp_rows
+
+        // Build volume per price row
+        var float[] vol_per_row = array.new_float(vp_rows, 0.0)
+        // Reset
+        for r = 0 to vp_rows - 1
+            array.set(vol_per_row, r, 0.0)
+
+        // Accumulate volume into rows
+        for i = 0 to math.min(vp_lookback - 1, bar_index)
+            bar_mid = (high[i] + low[i] + close[i]) / 3
+            row_idx = math.floor((bar_mid - lookback_low) / row_size)
+            row_idx := math.max(0, math.min(vp_rows - 1, row_idx))
+            array.set(vol_per_row, row_idx, array.get(vol_per_row, row_idx) + volume[i])
+
+        // Find POC (row with max volume)
+        max_vol = 0.0
+        poc_row = 0
+        for r = 0 to vp_rows - 1
+            v = array.get(vol_per_row, r)
+            if v > max_vol
+                max_vol := v
+                poc_row := r
+
+        poc_price := lookback_low + (poc_row + 0.5) * row_size
+
+        // Value Area: 70% of volume around POC
+        total_vol = 0.0
+        for r = 0 to vp_rows - 1
+            total_vol += array.get(vol_per_row, r)
+
+        target_vol = total_vol * 0.7
+        va_vol = array.get(vol_per_row, poc_row)
+        va_low_row = poc_row
+        va_high_row = poc_row
+
+        while va_vol < target_vol and (va_low_row > 0 or va_high_row < vp_rows - 1)
+            vol_below = va_low_row > 0 ? array.get(vol_per_row, va_low_row - 1) : 0
+            vol_above = va_high_row < vp_rows - 1 ? array.get(vol_per_row, va_high_row + 1) : 0
+            if vol_below >= vol_above and va_low_row > 0
+                va_low_row -= 1
+                va_vol += vol_below
+            else if va_high_row < vp_rows - 1
+                va_high_row += 1
+                va_vol += vol_above
+            else
+                break
+
+        vah_price := lookback_low + (va_high_row + 1) * row_size
+        val_price := lookback_low + va_low_row * row_size
+
+// Plot POC, VAH, VAL
+plot(show_vol_profile ? poc_price : na, "POC", color=color.new(#f59e0b, 20), style=plot.style_stepline, linewidth=2)
+plot(show_vol_profile ? vah_price : na, "VAH", color=color.new(#ef4444, 50), style=plot.style_stepline, linewidth=1)
+plot(show_vol_profile ? val_price : na, "VAL", color=color.new(#10b981, 50), style=plot.style_stepline, linewidth=1)
+
+// ═══════════════════════════════════════════════════════════════
+// 9b. VOLUME + DELTA BARS (bottom panel)
+// ═══════════════════════════════════════════════════════════════
+
+// Estimate delta from bar close position
+bar_range_val = high - low
+close_position = bar_range_val > 0 ? (close - low) / bar_range_val : 0.5
+est_delta = (close_position * 2 - 1) * volume
+est_delta_pct = close_position * 2 - 1
+
+// Cumulative delta (session-based approximation)
+var float cum_delta = 0.0
+is_new_session = ta.change(time("D")) != 0
+if is_new_session
+    cum_delta := 0
+cum_delta += est_delta
+
+// Volume colored by delta direction
+vol_color = est_delta > 0 ? color.new(#10b981, 60) : color.new(#ef4444, 60)
+
+// Plot volume as histogram at bottom (use separate pane if possible)
+// In overlay mode, we use plotchar for delta direction markers
+if show_delta_bars
+    plotchar(est_delta > volume * 0.3, "Strong Buy", "▲", location.belowbar,
+         color=color.new(#10b981, 70), size=size.tiny)
+    plotchar(est_delta < -volume * 0.3, "Strong Sell", "▼", location.abovebar,
+         color=color.new(#ef4444, 70), size=size.tiny)
+
+// ═══════════════════════════════════════════════════════════════
+// 10. LLM SUMMARY PANEL
 // ═══════════════════════════════════════════════════════════════
 
 if show_summary and barstate.islast
@@ -410,6 +521,12 @@ if show_summary and barstate.islast
     s += "PW H: " + str.tostring(pw_high, "#.#") + " L: " + str.tostring(pw_low, "#.#") + "\n"
     s += "PD H: " + str.tostring(pd_high, "#.#") + " L: " + str.tostring(pd_low, "#.#") + "\n"
     s += "IB: " + ib_status + "\n"
+    s += "───── VOLUME ─────\n"
+    poc_dist = not na(poc_price) ? close - poc_price : 0
+    poc_side = poc_dist > 0 ? "above" : "below"
+    s += "POC: " + str.tostring(nz(poc_price, 0), "#.#") + " (" + str.tostring(math.abs(poc_dist), "#") + "pt " + poc_side + ")\n"
+    s += "VAH: " + str.tostring(nz(vah_price, 0), "#.#") + " VAL: " + str.tostring(nz(val_price, 0), "#.#") + "\n"
+    s += "CVD: " + str.tostring(cum_delta, "#") + " | Δ%: " + str.tostring(est_delta_pct * 100, "#.#") + "%\n"
     s += "═══════════════════"
 
     label.new(bar_index + 3, high + atr14 * 0.5, s,
