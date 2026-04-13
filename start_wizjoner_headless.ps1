@@ -1,7 +1,7 @@
 param(
     [string]$ProjectRoot = "C:\SignalDashboard",
     [string]$PythonExe = "python",
-    [string]$Host = "127.0.0.1",
+    [string]$BindHost = "127.0.0.1",
     [int]$TcpPort = 5557,
     [int]$WsPort = 8082,
     [string]$RelayUrl = "https://web-production-3ff3f.up.railway.app/push",
@@ -44,7 +44,7 @@ $cmd = @(
     "&& set DASHBOARD_BAR_TF_MIN=$BarTfMin",
     "&& set SIGNAL_ENGINE_MODE=$EngineMode",
     "&& set NT_ACCOUNT_NAME=$AccountName",
-    "&& $PythonExe $ServerScript --host $Host --port $TcpPort --ws-port $WsPort --relay-url $RelayUrl --relay-secret $RelaySecret --account $AccountName >> `"$LogPath`" 2>&1"
+    "&& $PythonExe $ServerScript --host $BindHost --port $TcpPort --ws-port $WsPort --relay-url $RelayUrl --relay-secret $RelaySecret --account $AccountName >> `"$LogPath`" 2>&1"
 ) -join " "
 
 $proc = Start-Process -FilePath "cmd.exe" `
