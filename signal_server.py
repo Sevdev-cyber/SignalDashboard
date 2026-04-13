@@ -759,8 +759,10 @@ class SignalDashboardServer:
             else:
                 s["creation_time"] = now_ts
                 s["origin_bar"] = int(self.bar_count)
-                if "origin_time" not in s:
-                    s["origin_time"] = int(time.time())
+                # Use live/replay bar time as the birth timestamp. Some generators
+                # carry historical pattern timestamps from warmup context, which
+                # makes the server expire fresh setups immediately.
+                s["origin_time"] = last_bar_time if last_bar_time > 0 else int(time.time())
 
             if s["id"] not in merged:
                 added += 1
