@@ -437,6 +437,10 @@ let restOpen = false;
 let chart = null;
 let candleSeries = null;
 let priceLines = [];
+let guideChartHud = null;
+let latestGuide = null;
+let stableGuideState = {};
+let stableSignalBias = { bias: 'neutral', pct: 50, candidate: null, candidateCount: 0 };
 
 function connect() {
   ws = new WebSocket(WS_URL);
@@ -493,6 +497,88 @@ function initChart() {
     const newRect = entries[0].contentRect;
     chart.applyOptions({ width: newRect.width, height: newRect.height });
   }).observe(container);
+
+  container.style.position = 'relative';
+  guideChartHud = document.createElement('div');
+  guideChartHud.style.cssText = 'position:absolute;top:12px;left:12px;max-width:340px;pointer-events:none;z-index:5;display:flex;flex-direction:column;gap:8px';
+  container.appendChild(guideChartHud);
+  if (latestGuide) renderGuideHud(latestGuide);
+}
+
+function stabilizeBiasFlip(slot, rawBias, rawConf, options = {}) {
+  const minFlipCount = options.minFlipCount ?? 2;
+  const hardEdge = options.hardEdge ?? 15;
+  const softFloor = options.softFloor ?? 55;
+  const state = stableGuideState[slot] || {
+    bias: 'neutral',
+    confidence: 0,
+    candidate: null,
+    candidateCount: 0,
+  };
+
+  let shownBias = state.bias || 'neutral';
+  let shownConf = Number.isFinite(state.confidence) ? state.confidence : 0;
+  let candidate = state.candidate || null;
+  let candidateCount = state.candidateCount || 0;
+
+  if (rawBias === shownBias || rawBias === 'neutral') {
+    candidate = null;
+    candidateCount = 0;
+  } else if (candidate === rawBias) {
+    candidateCount += 1;
+  } else {
+    candidate = rawBias;
+    candidateCount = 1;
+  }
+
+  const firstAssignment = shownBias === 'neutral' && shownConf === 0;
+  const strongFlip = rawConf >= Math.max(softFloor, shownConf + hardEdge);
+  const confirmedFlip = candidateCount >= minFlipCount && rawConf >= Math.max(softFloor - 5, shownConf - 6);
+  if (rawBias !== 'neutral' && (firstAssignment || strongFlip || confirmedFlip)) {
+    shownBias = rawBias;
+    candidate = null;
+    candidateCount = 0;
+  }
+
+  shownConf = firstAssignment ? rawConf : Math.round(shownConf * 0.74 + rawConf * 0.26);
+  stableGuideState[slot] = { bias: shownBias, confidence: shownConf, candidate, candidateCount };
+  return stableGuideState[slot];
+}
+
+function prettyBias(bias) {
+  return String(bias || 'neutral').replaceAll('_', ' ');
+}
+
+function biasTone(bias) {
+  if (bias === 'long' || bias === 'neutral_to_long') return 'long';
+  if (bias === 'short' || bias === 'neutral_to_short') return 'short';
+  return 'neutral';
+}
+
+function renderGuideHud(guide) {
+  if (!guideChartHud) return;
+  if (!guide) {
+    guideChartHud.innerHTML = '';
+    return;
+  }
+  const structureBias = prettyBias(guide.display_overall_bias || guide.overall_bias);
+  const flow = guide.l2 || {};
+  const flowBias = prettyBias(flow.display_bias || flow.micro_bias);
+  guideChartHud.innerHTML = `
+    <div style="backdrop-filter:blur(10px);background:rgba(10,14,26,.82);border:1px solid rgba(255,255,255,.08);border-radius:12px;padding:10px 12px;box-shadow:0 10px 28px rgba(0,0,0,.28)">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
+        <span style="font-size:.62rem;text-transform:uppercase;letter-spacing:.8px;color:#94a3b8">Structure</span>
+        <span style="font-family:'JetBrains Mono',monospace;font-size:.75rem;font-weight:800;color:${biasTone(guide.display_overall_bias || guide.overall_bias) === 'long' ? '#10b981' : biasTone(guide.display_overall_bias || guide.overall_bias) === 'short' ? '#ef4444' : '#cbd5e1'}">${structureBias}</span>
+        <span style="font-family:'JetBrains Mono',monospace;font-size:.68rem;color:#cbd5e1">${guide.display_confidence || guide.confidence || 0}%</span>
+      </div>
+      <div style="font-size:.72rem;line-height:1.4;color:#cbd5e1">${guide.continuation?.message || guide.summary || 'Waiting for structure.'}</div>
+    </div>
+    <div style="backdrop-filter:blur(8px);background:rgba(10,14,26,.70);border:1px solid rgba(255,255,255,.06);border-radius:10px;padding:8px 10px">
+      <div style="font-size:.62rem;text-transform:uppercase;letter-spacing:.8px;color:#94a3b8;margin-bottom:4px">Flow / Tick</div>
+      <div style="font-family:'JetBrains Mono',monospace;font-size:.74rem;font-weight:700;color:${biasTone(flow.display_bias || flow.micro_bias) === 'long' ? '#34d399' : biasTone(flow.display_bias || flow.micro_bias) === 'short' ? '#f87171' : '#cbd5e1'}">${flowBias} · ${flow.display_confidence || flow.confidence || 0}%</div>
+      <div style="font-size:.68rem;line-height:1.35;color:#94a3b8;margin-top:3px">${flow.summary || 'Waiting for flow context.'}</div>
+    </div>
+  `;
 }
 
 function updateChartHistory(bars) {
@@ -590,6 +676,37 @@ function updateSignals(signals) {
 
   const top = deduped.slice(0, TOP_N);
   const rest = deduped.slice(TOP_N);
+  const longs = deduped.filter(s => s.direction === 'long');
+  const shorts = deduped.filter(s => s.direction === 'short');
+  const longConf = longs.reduce((sum, s) => sum + (s.confidence_pct || 0), 0);
+  const shortConf = shorts.reduce((sum, s) => sum + (s.confidence_pct || 0), 0);
+  const totalConf = longConf + shortConf || 1;
+  const rawLongBias = Math.round(longConf / totalConf * 100);
+  const rawShortBias = 100 - rawLongBias;
+  const rawBiasDir = rawLongBias > rawShortBias ? 'long' : rawShortBias > rawLongBias ? 'short' : 'neutral';
+  const rawBiasPct = Math.max(rawLongBias, rawShortBias);
+  if (rawBiasDir === stableSignalBias.bias || rawBiasDir === 'neutral') {
+    stableSignalBias.candidate = null;
+    stableSignalBias.candidateCount = 0;
+  } else if (stableSignalBias.candidate === rawBiasDir) {
+    stableSignalBias.candidateCount += 1;
+  } else {
+    stableSignalBias.candidate = rawBiasDir;
+    stableSignalBias.candidateCount = 1;
+  }
+  if (
+    rawBiasDir !== 'neutral' &&
+    (stableSignalBias.bias === 'neutral' ||
+      rawBiasPct >= stableSignalBias.pct + 12 ||
+      (stableSignalBias.candidateCount >= 2 && rawBiasPct >= Math.max(58, stableSignalBias.pct - 5)))
+  ) {
+    stableSignalBias.bias = rawBiasDir;
+    stableSignalBias.candidate = null;
+    stableSignalBias.candidateCount = 0;
+  }
+  stableSignalBias.pct = stableSignalBias.pct
+    ? Math.round(stableSignalBias.pct * 0.7 + rawBiasPct * 0.3)
+    : rawBiasPct;
 
   txt('topCount', top.length);
   txt('statSignals', top.length);
@@ -613,6 +730,14 @@ function updateSignals(signals) {
     topEl.innerHTML = `<div class="empty-state"><div class="icon">🔇</div><div class="title">No active signals</div><div class="desc">Waiting for next bar close…</div></div>`;
   } else {
     topEl.innerHTML = '';
+    const biasDir = stableSignalBias.bias === 'neutral' ? rawBiasDir : stableSignalBias.bias;
+    const biasPct = Math.max(50, stableSignalBias.pct || rawBiasPct);
+    const biasColor = biasDir === 'long' ? 'var(--long)' : biasDir === 'short' ? 'var(--short)' : 'var(--text-primary)';
+    const biasArrow = biasDir === 'long' ? '▲' : biasDir === 'short' ? '▼' : '•';
+    const biasBanner = document.createElement('div');
+    biasBanner.style.cssText = 'grid-column:1/-1;background:rgba(59,130,246,.08);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px 12px;font-size:.78rem;margin-bottom:8px';
+    biasBanner.innerHTML = `${biasArrow} <span style="color:${biasColor};font-weight:800">${String(biasDir).toUpperCase()} BIAS ${biasPct}%</span> <span style="color:var(--text-muted);margin-left:8px">raw ${String(rawBiasDir).toUpperCase()} ${rawBiasPct}% • wygładzone</span>`;
+    topEl.appendChild(biasBanner);
     top.forEach((sig, i) => topEl.appendChild(createHeroCard(sig, i + 1)));
   }
 
@@ -812,21 +937,44 @@ function updateGuide(guide) {
   const l2 = $('guideL2');
   const zones = $('guideZones');
   if (!overall || !grid || !focus || !l2 || !zones) return;
+  latestGuide = guide || null;
   if (!guide) {
     overall.innerHTML = '<div class="guide-summary">Brak guide jeszcze.</div>';
     grid.innerHTML = '<div class="guide-card"><div class="guide-card-note">No 5m guide yet</div></div><div class="guide-card"><div class="guide-card-note">No 15m guide yet</div></div>';
     focus.innerHTML = '<div class="guide-empty">Waiting for continuation / invalidation…</div>';
     l2.innerHTML = '<div class="guide-l2-sub">Waiting for live bid/ask reaction…</div>';
     zones.innerHTML = '<div class="guide-empty">Waiting for probable zones…</div>';
+    renderGuideHud(null);
     return;
+  }
+
+  const overallStable = stabilizeBiasFlip('overall_bias', guide.overall_bias || 'neutral', guide.confidence || 0, {
+    minFlipCount: 2,
+    hardEdge: 18,
+    softFloor: 58,
+  });
+  guide.display_overall_bias = overallStable.bias || guide.overall_bias || 'neutral';
+  guide.display_confidence = overallStable.confidence || guide.confidence || 0;
+
+  const l2Guide = guide.l2 ? { ...guide.l2 } : null;
+  if (l2Guide) {
+    const l2Stable = stabilizeBiasFlip('l2_bias', l2Guide.micro_bias || 'neutral', l2Guide.confidence || 0, {
+      minFlipCount: 3,
+      hardEdge: 16,
+      softFloor: 55,
+    });
+    l2Guide.display_bias = l2Stable.bias || l2Guide.micro_bias || 'neutral';
+    l2Guide.display_confidence = l2Stable.confidence || l2Guide.confidence || 0;
+    guide.l2 = l2Guide;
   }
 
   overall.innerHTML = `
     <div class="guide-overall-header">
-      <div class="guide-bias ${guide.overall_bias || 'neutral'}">${(guide.overall_bias || 'neutral').replaceAll('_', ' ')}</div>
-      <div class="guide-conf">conf ${guide.confidence || 0}%</div>
+      <div class="guide-bias ${guide.display_overall_bias || guide.overall_bias || 'neutral'}">${prettyBias(guide.display_overall_bias || guide.overall_bias)}</div>
+      <div class="guide-conf">conf ${guide.display_confidence || guide.confidence || 0}%</div>
     </div>
     <div class="guide-summary">${guide.summary || 'No summary.'}</div>
+    <div class="guide-card-note" style="margin-top:6px">Structure = 5m/15m context. Flow = tick/L2 reaction and can wobble faster inside the same structure.</div>
   `;
 
   const cards = [guide.tf_5m, guide.tf_15m].map(tf => {
@@ -875,13 +1023,13 @@ function updateGuide(guide) {
   }
   focus.innerHTML = focusItems.length ? focusItems.join('') : '<div class="guide-empty">No focus zones yet.</div>';
 
-  const l2Guide = guide.l2;
   if (l2Guide) {
     l2.innerHTML = `
       <div class="guide-l2-title">L2 Reaction</div>
-      <div class="guide-l2-main">${(l2Guide.micro_bias || 'neutral').replaceAll('_', ' ')} · conf ${l2Guide.confidence || 0}%</div>
+      <div class="guide-l2-main">${prettyBias(l2Guide.display_bias || l2Guide.micro_bias)} · conf ${l2Guide.display_confidence || l2Guide.confidence || 0}%</div>
       <div class="guide-l2-sub">${l2Guide.summary || ''}</div>
       <div class="guide-l2-sub">Spread ${l2Guide.spread ?? '—'} · imbalance ${l2Guide.imbalance ?? '—'} · large buy ${l2Guide.large_buy ?? 0} / large sell ${l2Guide.large_sell ?? 0}</div>
+      <div class="guide-l2-sub">Flow state ${l2Guide.flow_state || 'balanced'} · raw ${prettyBias(l2Guide.raw_micro_bias || l2Guide.micro_bias)} ${l2Guide.raw_confidence ?? l2Guide.confidence ?? 0}%</div>
     `;
   } else {
     l2.innerHTML = '<div class="guide-l2-sub">Waiting for live bid/ask reaction…</div>';
@@ -900,6 +1048,8 @@ function updateGuide(guide) {
       <div class="guide-zone-why">${z.why || ''}</div>
     </div>
   `).join('');
+  latestGuide = guide;
+  renderGuideHud(guide);
 }
 
 function setInd(id, value, cls) {

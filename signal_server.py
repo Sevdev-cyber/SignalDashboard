@@ -80,6 +80,13 @@ class SignalDashboardServer:
         self._latest_signals: list[dict] = []
         self._latest_zones: dict = {}
         self._recent_ticks = deque(maxlen=1200)
+        self._l2_display_state = {
+            "bias": "neutral",
+            "confidence": 0,
+            "candidate": None,
+            "candidate_count": 0,
+            "updated_at": 0.0,
+        }
         self.loop = None
 
     # ── WebSocket Server ──
@@ -616,7 +623,8 @@ class SignalDashboardServer:
     def _inject_l2_guide(self, state: dict) -> None:
         if not state:
             return
-        guide = self._build_l2_guide(current_price=float(state.get("price", self.current_price or 0.0)))
+        raw_guide = self._build_l2_guide(current_price=float(state.get("price", self.current_price or 0.0)))
+        guide = self._stabilize_l2_guide(raw_guide)
         state["l2_guide"] = guide
         trader_guide = dict(state.get("trader_guide") or {})
         trader_guide["l2"] = guide
@@ -625,8 +633,70 @@ class SignalDashboardServer:
             merged_zones.extend(guide["zones"])
             trader_guide["zones"] = merged_zones[:6]
         if guide.get("summary"):
-            trader_guide["summary"] = f"{trader_guide.get('summary', '')} L2: {guide['summary']}".strip()
+            trader_guide["summary"] = f"{trader_guide.get('summary', '')} Flow: {guide['summary']}".strip()
         state["trader_guide"] = trader_guide
+
+    def _stabilize_l2_guide(self, guide: dict) -> dict:
+        """Smooth micro-flow so UI doesn't flip direction on every burst of ticks."""
+        state = dict(self._l2_display_state)
+        now = time.time()
+        raw_bias = str(guide.get("micro_bias") or "neutral")
+        raw_conf = int(guide.get("confidence") or 0)
+        shown_bias = str(state.get("bias") or "neutral")
+        shown_conf = int(state.get("confidence") or 0)
+        candidate = state.get("candidate")
+        candidate_count = int(state.get("candidate_count") or 0)
+
+        if raw_bias == shown_bias or raw_bias == "neutral":
+            candidate = None
+            candidate_count = 0
+        elif raw_bias == candidate:
+            candidate_count += 1
+        else:
+            candidate = raw_bias
+            candidate_count = 1
+
+        first_assignment = shown_bias == "neutral" and shown_conf == 0
+        strong_override = raw_conf >= max(72, shown_conf + 18)
+        confirmed_flip = candidate_count >= 3 and raw_conf >= max(50, shown_conf - 8)
+        time_release = (now - float(state.get("updated_at") or 0.0)) >= 4.0 and raw_conf >= max(58, shown_conf)
+
+        if raw_bias != "neutral" and (first_assignment or strong_override or confirmed_flip or time_release):
+            shown_bias = raw_bias
+            candidate = None
+            candidate_count = 0
+
+        if first_assignment:
+            shown_conf = raw_conf
+        else:
+            shown_conf = int(round(shown_conf * 0.72 + raw_conf * 0.28))
+            if shown_bias != raw_bias:
+                shown_conf = min(shown_conf, max(40, raw_conf))
+        shown_conf = max(0, min(90, shown_conf))
+
+        flow_state = "balanced"
+        if shown_bias == raw_bias and shown_bias != "neutral" and raw_conf >= 60:
+            flow_state = "confirmed"
+        elif shown_bias != raw_bias and raw_bias != "neutral":
+            flow_state = "probing"
+        elif shown_bias != "neutral":
+            flow_state = "leaning"
+
+        stabilized = dict(guide)
+        stabilized["raw_micro_bias"] = raw_bias
+        stabilized["raw_confidence"] = raw_conf
+        stabilized["micro_bias"] = shown_bias
+        stabilized["confidence"] = shown_conf
+        stabilized["flow_state"] = flow_state
+
+        self._l2_display_state = {
+            "bias": shown_bias,
+            "confidence": shown_conf,
+            "candidate": candidate,
+            "candidate_count": candidate_count,
+            "updated_at": now,
+        }
+        return stabilized
 
     def _build_l2_guide(self, *, current_price: float) -> dict:
         ticks = list(self._recent_ticks)
