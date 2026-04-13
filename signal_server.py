@@ -86,7 +86,25 @@ class SignalDashboardServer:
 
     def _safe_json(self, data: dict) -> str:
         """Serialize to JSON, replacing NaN/Infinity with null."""
-        return json.dumps(data, allow_nan=True).replace('NaN', 'null').replace('Infinity', 'null').replace('-Infinity', 'null')
+        return json.dumps(data, allow_nan=True, default=self._json_fallback).replace('NaN', 'null').replace('Infinity', 'null').replace('-Infinity', 'null')
+
+    @staticmethod
+    def _json_fallback(obj):
+        """Handle non-serializable types (Timestamp, numpy, etc.)."""
+        import numpy as np
+        if hasattr(obj, 'timestamp'):  # pandas.Timestamp, datetime
+            return int(obj.timestamp())
+        if hasattr(obj, 'isoformat'):  # datetime
+            return obj.isoformat()
+        if isinstance(obj, (np.integer,)):
+            return int(obj)
+        if isinstance(obj, (np.floating,)):
+            return float(obj)
+        if isinstance(obj, (np.ndarray,)):
+            return obj.tolist()
+        if isinstance(obj, set):
+            return list(obj)
+        return str(obj)
 
     async def _ws_handler(self, ws):
         """Handle a new WebSocket connection."""
