@@ -267,10 +267,87 @@ if show_summary and barstate.islast
          size=size.normal)
 
 // ═══════════════════════════════════════════════════════════════
-// 6. ALERTS (for webhook → bot integration)
+// 6. WEBHOOK DATA EXPORT (sends full context every bar)
 // ═══════════════════════════════════════════════════════════════
 
-// FVG touch alert
+// Build JSON payload with all context data
+// TradingView sends this via webhook POST to your endpoint
+
+export_atr = ta.atr(14)
+export_ema20 = ta.ema(close, 20)
+export_ema50 = ta.ema(close, 50)
+export_rsi = ta.rsi(close, 14)
+export_vwap = w_vwap
+export_trend = export_ema20 > export_ema50 ? "bull" : "bear"
+export_vwap_pos = close > export_vwap ? "above" : "below"
+
+// Delta estimation (close position in bar)
+bar_range = high - low
+close_pos = bar_range > 0 ? (close - low) / bar_range : 0.5
+est_delta_pct = (close_pos * 2 - 1) * 100
+
+// Session detection
+export_session = cur_hour >= 9 and cur_hour < 16 ? "NY" : cur_hour >= 3 and cur_hour < 9 ? "LON" : "OVERNIGHT"
+
+// Count active FVGs
+export_bull_fvg = 0
+export_bear_fvg = 0
+export_nearest_fvg = 9999.0
+export_nearest_fvg_side = "none"
+if array.size(fvg_dirs) > 0
+    for i = 0 to math.max(0, array.size(fvg_dirs) - 1)
+        if i < array.size(fvg_dirs)
+            fd = array.get(fvg_dirs, i)
+            fmid = (array.get(fvg_tops, i) + array.get(fvg_bots, i)) / 2
+            fdist = math.abs(close - fmid)
+            if fd == 1
+                export_bull_fvg += 1
+            else
+                export_bear_fvg += 1
+            if fdist < export_nearest_fvg
+                export_nearest_fvg := fdist
+                export_nearest_fvg_side := fd == 1 ? "bull" : "bear"
+
+// JSON for webhook alert message (use in alert → Webhook URL → Message)
+// Copy this format into your TradingView alert message field:
+webhook_json = '{'
+ + '"ticker":"' + syminfo.ticker + '"'
+ + ',"tf":"' + timeframe.period + '"'
+ + ',"time":"' + str.tostring(year) + '-' + str.tostring(month, '00') + '-' + str.tostring(dayofmonth, '00') + ' ' + str.tostring(hour, '00') + ':' + str.tostring(minute, '00') + '"'
+ + ',"price":' + str.tostring(close, '#.##')
+ + ',"open":' + str.tostring(open, '#.##')
+ + ',"high":' + str.tostring(high, '#.##')
+ + ',"low":' + str.tostring(low, '#.##')
+ + ',"volume":' + str.tostring(volume, '#')
+ + ',"atr":' + str.tostring(export_atr, '#.##')
+ + ',"ema20":' + str.tostring(export_ema20, '#.##')
+ + ',"ema50":' + str.tostring(export_ema50, '#.##')
+ + ',"rsi":' + str.tostring(export_rsi, '#.#')
+ + ',"vwap":' + str.tostring(export_vwap, '#.##')
+ + ',"trend":"' + export_trend + '"'
+ + ',"vwap_pos":"' + export_vwap_pos + '"'
+ + ',"delta_pct":' + str.tostring(est_delta_pct, '#.#')
+ + ',"session":"' + export_session + '"'
+ + ',"pw_high":' + str.tostring(nz(pw_high, 0), '#.##')
+ + ',"pw_low":' + str.tostring(nz(pw_low, 0), '#.##')
+ + ',"pd_high":' + str.tostring(nz(d_high, 0), '#.##')
+ + ',"pd_low":' + str.tostring(nz(d_low, 0), '#.##')
+ + ',"pd_close":' + str.tostring(nz(d_close, 0), '#.##')
+ + ',"bull_fvg":' + str.tostring(export_bull_fvg)
+ + ',"bear_fvg":' + str.tostring(export_bear_fvg)
+ + ',"nearest_fvg_dist":' + str.tostring(export_nearest_fvg < 9999 ? export_nearest_fvg : 0, '#.#')
+ + ',"nearest_fvg_side":"' + export_nearest_fvg_side + '"'
+ + '}'
+
+// Plot as invisible for alert access
+plot(0, "webhook_data", display=display.none, editable=false)
+
+// ── ALERTS ──
+
+// Every bar close — sends full context JSON via webhook
+alertcondition(true, "Bar Close Context", "{{plot_0}}")
+
+// Specific events
 fvg_touch = false
 if array.size(fvg_tops) > 0
     for i = 0 to math.max(0, array.size(fvg_tops) - 1)
@@ -283,4 +360,21 @@ if array.size(fvg_tops) > 0
 
 alertcondition(fvg_touch, "FVG Touch", "Price touching active FVG zone")
 alertcondition(ny_open_now, "NY Open", "New York session opened")
-alertcondition(ta.cross(close, ema20), "EMA20 Cross", "Price crossed EMA20")
+alertcondition(ta.cross(close, export_ema20), "EMA20 Cross", "Price crossed EMA20")
+
+// ═══════════════════════════════════════════════════════════════
+// 7. TOOLTIP DATA (hover over bars to read full context)
+// ═══════════════════════════════════════════════════════════════
+
+// Add tooltip with full data to every bar (LLM can read from screenshot hover)
+if barstate.isconfirmed
+    tooltip_text = "═ CONTEXT ═\n"
+     + "T: " + export_trend + " | VWAP: " + export_vwap_pos + "\n"
+     + "ATR: " + str.tostring(export_atr, "#.#") + " RSI: " + str.tostring(export_rsi, "#.#") + "\n"
+     + "Δ: " + str.tostring(est_delta_pct, "#.#") + "% | " + export_session + "\n"
+     + "FVG: " + str.tostring(export_bull_fvg) + "↑ " + str.tostring(export_bear_fvg) + "↓"
+     + (export_nearest_fvg < 9999 ? " near:" + str.tostring(export_nearest_fvg, "#") + "pt" : "")
+
+    label.new(bar_index, low - export_atr * 0.3, tooltip_text,
+         style=label.style_none, textcolor=color.new(color.gray, 80),
+         size=size.tiny, tooltip=webhook_json)
