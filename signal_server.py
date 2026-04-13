@@ -98,6 +98,10 @@ class SignalDashboardServer:
             "candidate_count": 0,
             "updated_at": 0.0,
         }
+        self._last_local_emit = 0.0
+        self._last_relay_emit = 0.0
+        self._min_local_emit_sec = 1.0
+        self._min_relay_emit_sec = 1.0
         self.loop = None
 
     # ── WebSocket Server ──
@@ -159,10 +163,11 @@ class SignalDashboardServer:
 
     async def _broadcast_split(self, full_payload: dict, all_bars: list):
         """Send full data to local WS clients, reduced data to relay."""
+        now = time.time()
         full_msg = self._safe_json(full_payload)
 
         # Relay gets reduced payload: top 15 signals, last 200 bars, no history
-        if self.relay_url:
+        if self.relay_url and (now - self._last_relay_emit >= self._min_relay_emit_sec):
             relay_payload = dict(full_payload)
             relay_payload["signals"] = full_payload.get("signals", [])[:15]
             relay_payload["bars"] = all_bars[-200:] if all_bars else []
@@ -174,10 +179,14 @@ class SignalDashboardServer:
             try:
                 loop = self.loop or asyncio.get_event_loop()
                 loop.run_in_executor(self.executor, self._push_to_relay, relay_msg)
+                self._last_relay_emit = now
             except Exception as e:
                 log.error("Relay dispatch error: %s", e)
 
         # Local WS gets full payload
+        if now - self._last_local_emit < self._min_local_emit_sec:
+            return
+
         dead = set()
         for ws in list(self._ws_clients):
             try:
@@ -185,6 +194,7 @@ class SignalDashboardServer:
             except Exception:
                 dead.add(ws)
         self._ws_clients -= dead
+        self._last_local_emit = now
 
     async def _broadcast(self, data: dict):
         """Send data to all connected WebSocket clients AND to the relay."""
@@ -578,6 +588,10 @@ class SignalDashboardServer:
         if not self._latest_state:
             return
 
+        now = time.time()
+        if now - self._last_local_emit < self._min_local_emit_sec:
+            return
+
         # Recompute state with current tick price
         state = self.engine.get_market_state(
             self.bars_df,
@@ -602,13 +616,11 @@ class SignalDashboardServer:
         if self.loop:
             msg = self._safe_json(local_payload)
             asyncio.run_coroutine_threadsafe(self._ws_only(msg), self.loop)
+            self._last_local_emit = now
 
             # Relay: lightweight — state + signals (so Railway dashboard stays in sync)
-            now = time.time()
-            if not hasattr(self, '_last_relay_tick'):
-                self._last_relay_tick = 0
-            if now - self._last_relay_tick >= 2:
-                self._last_relay_tick = now
+            if now - self._last_relay_emit >= 2:
+                self._last_relay_emit = now
                 relay_tick = {
                     "type": "tick_update",
                     "state": state,
