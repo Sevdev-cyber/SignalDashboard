@@ -487,6 +487,7 @@ var sessionOverlay = null;
 var fvgOverlay = null;
 var guideChartHud = null;
 var latestGuide = null;
+var latestExecution = null;
 var stableGuideState = {};
 var stableSignalBias = { bias: 'neutral', pct: 50, candidate: null, candidateCount: 0 };
 var chartSessionBlocks = [];
@@ -508,7 +509,8 @@ function connect() {
     try {
       const d = JSON.parse(e.data);
       if (d.bars && d.bars.length > 0) updateChartHistory(d.bars);
-      if (d.signals || d.ghost_signals) updateSignals(d.signals || [], d.resolved || [], d.ghost_signals || []);
+      if (d.execution) latestExecution = d.execution;
+      if (d.signals || d.ghost_signals) updateSignals(d.signals || [], d.resolved || [], d.ghost_signals || [], d.execution || latestExecution || null);
       if (d.history) updateHistory(d.history);
       if (d.state) {
         updateState(d.state);
@@ -1575,34 +1577,38 @@ function snapToBar(ts) {
 }
 
 var _lastSignalHash = '';
-function updateSignals(signals, resolved, ghostSignals) {
+function updateSignals(signals, resolved, ghostSignals, executionView) {
   if (!signals) signals = [];
   if (!resolved) resolved = [];
   if (!ghostSignals) ghostSignals = [];
+  const rawSignals = Array.isArray(signals) ? signals.slice() : [];
+  const execSignals = Array.isArray(executionView?.shortlist) ? executionView.shortlist.slice() : [];
+  const displaySignals = execSignals.length ? execSignals : rawSignals.slice();
 
   // Sort by confidence (highest first) — consistent with dots, labels, best signal
   const p = lastPrice || 0;
-  signals.sort((a,b) => (b.confidence_pct||0) - (a.confidence_pct||0));
+  rawSignals.sort((a,b) => (b.confidence_pct||0) - (a.confidence_pct||0));
+  displaySignals.sort((a,b) => (b.confidence_pct||0) - (a.confidence_pct||0));
 
   // Skip full re-render if signal set hasn't changed (prevents flicker)
-  const sigHash = signals.map(s => s.id + ':' + s.confidence_pct).join('|');
+  const sigHash = displaySignals.map(s => s.id + ':' + s.confidence_pct).join('|');
   const structureChanged = sigHash !== _lastSignalHash;
   _lastSignalHash = sigHash;
 
   // Always update SVG positions (cheap), but only rebuild DOM cards when structure changes
   if (!structureChanged) {
     // Just reposition SVG overlay (price coordinates may have shifted)
-    updatePredictions(signals, lastAtr, ghostSignals);
+    updatePredictions(displaySignals, lastAtr, ghostSignals);
     return;
   }
 
-  const top = signals.slice(0, TOP_N);
-  const rest = signals.slice(TOP_N);
-  const sameDirAligned = signals.filter(s => (s.confluence_count || s.same_dir_family_count || 1) >= 3).length;
+  const top = displaySignals.slice(0, TOP_N);
+  const rest = displaySignals.slice(TOP_N);
+  const sameDirAligned = displaySignals.filter(s => (s.confluence_count || s.same_dir_family_count || 1) >= 3).length;
 
   txt('topCount', top.length);
   txt('statSignals', top.length);
-  txt('statTotal', signals.length);
+  txt('statTotal', rawSignals.length);
 
   // Clean old price lines
   if (candleSeries) {
@@ -1611,16 +1617,16 @@ function updateSignals(signals, resolved, ghostSignals) {
   }
 
   // ALL signals → SVG prediction dots (entry, TP, SL) on chart
-  updatePredictions(signals, lastAtr, ghostSignals);
+  updatePredictions(displaySignals, lastAtr, ghostSignals);
 
   // All signals shown as prediction dots — compact summary instead of cards
   const topEl = $('topSignals');
-  if (signals.length === 0) {
+  if (displaySignals.length === 0) {
     topEl.innerHTML = `<div class="empty-state"><div class="icon">📡</div><div class="title">No active signals</div><div class="desc">Waiting for next bar close…</div></div>`;
   } else {
-    const longs = signals.filter(s => s.direction === 'long');
-    const shorts = signals.filter(s => s.direction === 'short');
-    const bySig = [...signals].sort((a,b) => (b.confidence_pct||0) - (a.confidence_pct||0));
+    const longs = displaySignals.filter(s => s.direction === 'long');
+    const shorts = displaySignals.filter(s => s.direction === 'short');
+    const bySig = [...displaySignals].sort((a,b) => (b.confidence_pct||0) - (a.confidence_pct||0));
     const bestSig = bySig[0];
     const bestConf = bestSig ? bestSig.confidence_pct : 0;
     const bDir = bestSig.direction;
@@ -1629,6 +1635,8 @@ function updateSignals(signals, resolved, ghostSignals) {
     const inZoneNow = p ? (bDir === 'long' ? p <= bestSig.entry : p >= bestSig.entry) : false;
     const filled = bestSig.entry_touched === true;
     const confluenceCount = bestSig.confluence_count || bestSig.same_dir_family_count || 1;
+    const execCount = Number.isFinite(Number(executionView?.shortlist_count)) ? Number(executionView.shortlist_count) : displaySignals.length;
+    const rawCount = Number.isFinite(Number(executionView?.raw_count)) ? Number(executionView.raw_count) : rawSignals.length;
     const triggerText = filled ? 'filled' : inZoneNow ? 'entry now' : `${entryDist} pts away`;
     topEl.innerHTML = `
       <div style="display:grid;gap:10px">
@@ -1636,7 +1644,7 @@ function updateSignals(signals, resolved, ghostSignals) {
           <span class="decision-chip ${longs.length ? 'good' : 'warn'}">long ${longs.length}</span>
           <span class="decision-chip ${shorts.length ? 'bad' : 'warn'}">short ${shorts.length}</span>
           <span class="decision-chip ${sameDirAligned >= 1 ? 'good' : 'warn'}">${sameDirAligned} strong cluster</span>
-          <span class="decision-chip">${signals.length} total</span>
+          <span class="decision-chip">exec ${execCount}/${rawCount}</span>
         </div>
         <div style="background:var(--bg-card);border:1px solid var(--border);border-left:4px solid ${bColor};border-radius:var(--radius);padding:16px 18px">
           <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:8px">
@@ -1652,9 +1660,10 @@ function updateSignals(signals, resolved, ghostSignals) {
             <span class="decision-chip bad">sl ${(bestSig.invalidation ?? bestSig.sl)?.toFixed(2)}</span>
             <span class="decision-chip">${triggerText}</span>
             <span class="decision-chip">${confluenceCount}x aligned</span>
+            ${bestSig.exec_score != null ? `<span class="decision-chip good">score ${Number(bestSig.exec_score).toFixed(1)}</span>` : ''}
           </div>
           <div style="margin-top:8px;font-size:.74rem;line-height:1.45;color:var(--text-secondary)">
-            ${bestSig.reasons && bestSig.reasons.length ? bestSig.reasons.slice(0, 3).join(' · ') : 'No extra context.'}
+            ${bestSig.exec_notes && bestSig.exec_notes.length ? bestSig.exec_notes.slice(0, 3).join(' · ') : bestSig.reasons && bestSig.reasons.length ? bestSig.reasons.slice(0, 3).join(' · ') : 'No extra context.'}
           </div>
         </div>
       </div>`;
@@ -1663,7 +1672,7 @@ function updateSignals(signals, resolved, ghostSignals) {
   // Hide rest toggle (all signals are dots now)
   $('restToggle').style.display = 'none';
 
-  buildVerdict(top, signals);
+  buildVerdict(top, displaySignals);
 }
 
 function createHeroCard(sig, rank) {

@@ -30,6 +30,7 @@ latest_data = {
     "type": "full_update",
     "state": {},
     "signals": [],
+    "execution": {},
     "resolved": [],
     "zones": {},
     "history": [],
@@ -89,6 +90,8 @@ async def push_handler(request):
         latest_data["state"] = data["state"]
     if "signals" in data:
         latest_data["signals"] = data["signals"]
+    if "execution" in data:
+        latest_data["execution"] = data["execution"]
     if "zones" in data:
         latest_data["zones"] = data["zones"]
     if "resolved" in data:

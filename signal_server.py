@@ -33,6 +33,7 @@ import compat  # noqa: F401 — patches dataclass for Python 3.9 (before hsb)
 from signal_engine import SignalEngine
 from bar_builder import get_target_tf_min
 from market_snapshot_bot import MarketSnapshotBot
+from signal_execution_bot import ExecutionConfig, SignalExecutionBot
 
 LOG_FMT = "%(asctime)s [%(name)-14s] %(levelname)-5s  %(message)s"
 log = logging.getLogger("signal_dash")
@@ -73,6 +74,7 @@ class SignalDashboardServer:
 
         self.engine = SignalEngine()
         self.snapshot_bot = MarketSnapshotBot()
+        self.execution_selector = SignalExecutionBot(ExecutionConfig())
         self.bars_df = pd.DataFrame()
         self.current_price = 0.0
         self.bar_count = 0
@@ -95,6 +97,7 @@ class SignalDashboardServer:
         self._latest_engine_debug: dict = {}
         self._latest_zones: dict = {}
         self._latest_market_decision: dict = {}
+        self._latest_execution_view: dict = {}
         self._decision_ledger: list[dict] = []
         self._decision_resolved: list[dict] = []
         self._decision_signature_active: str | None = None
@@ -156,6 +159,52 @@ class SignalDashboardServer:
                 "assessment": {},
                 "prompt": "",
             }
+
+    def _build_execution_view(
+        self,
+        *,
+        signals_payload: list[dict],
+        market_decision: dict,
+        price: float,
+        atr: float,
+    ) -> dict:
+        try:
+            ranked = self.execution_selector.rank_signals(
+                signals=signals_payload,
+                market_decision=market_decision,
+                price=price,
+                atr=atr,
+                bar_index=int(self.bar_count),
+            )
+        except Exception as e:
+            log.debug("execution view error: %s", e)
+            return {
+                "raw_count": len(signals_payload),
+                "shortlist_count": 0,
+                "primary": None,
+                "shortlist": [],
+                "error": str(e),
+            }
+
+        shortlist = []
+        for sig in ranked[:8]:
+            item = dict(sig)
+            item["exec_score"] = float(item.pop("_exec_score", 0.0))
+            item["exec_notes"] = list(item.pop("_exec_notes", []) or [])
+            shortlist.append(item)
+
+        primary = shortlist[0] if shortlist else None
+        return {
+            "raw_count": len(signals_payload),
+            "shortlist_count": len(shortlist),
+            "primary": primary,
+            "shortlist": shortlist,
+            "config": {
+                "max_initial_risk_points": self.execution_selector.config.max_initial_risk_points,
+                "max_confluence_risk_points": self.execution_selector.config.max_confluence_risk_points,
+                "min_target_r_multiple": self.execution_selector.config.min_target_r_multiple,
+            },
+        }
 
     def _decision_signature(self, decision: dict) -> str:
         entry = decision.get("entry_zone") or {}
@@ -796,11 +845,19 @@ class SignalDashboardServer:
         
         zones = self.engine.compute_weighted_zones(signals_payload)
         market_decision = self._build_market_decision(state, signals_payload, zones, ghost_signals)
+        execution_view = self._build_execution_view(
+            signals_payload=signals_payload,
+            market_decision=market_decision,
+            price=price,
+            atr=atr,
+        )
         decision_ledger = self._update_decision_ledger(market_decision, price, self.bar_count, state)
         state["market_decision"] = market_decision
+        state["execution_view"] = execution_view
         trader_guide = dict(state.get("trader_guide") or {})
         trader_guide["market_decision"] = market_decision
         trader_guide["decision_ledger"] = decision_ledger
+        trader_guide["execution_view"] = execution_view
         state["trader_guide"] = trader_guide
         state["decision_ledger"] = decision_ledger
         state["decision_stats"] = self._decision_stats()
@@ -812,6 +869,7 @@ class SignalDashboardServer:
         self._latest_ghost_signals = ghost_signals
         self._latest_engine_debug = engine_debug
         self._latest_zones = zones
+        self._latest_execution_view = execution_view
 
         # Extract recent candlestick history for TradingView chart
         bars_for_chart = []
@@ -843,6 +901,7 @@ class SignalDashboardServer:
             "signals": signals_payload,
             "ghost_signals": ghost_signals,
             "market_decision": market_decision,
+            "execution": execution_view,
             "decision_ledger": decision_ledger,
             "decision_stats": state["decision_stats"],
             "resolved": self.resolved_signals,
@@ -882,11 +941,19 @@ class SignalDashboardServer:
         signals_payload.sort(key=lambda x: x["confidence_pct"], reverse=True)
         self._latest_signals = signals_payload
         market_decision = self._build_market_decision(state, signals_payload, self._latest_zones, self._latest_ghost_signals)
+        execution_view = self._build_execution_view(
+            signals_payload=signals_payload,
+            market_decision=market_decision,
+            price=price,
+            atr=float(self.bars_df.iloc[-1].get("atr", 20)) if not self.bars_df.empty else 20.0,
+        )
         decision_ledger = self._update_decision_ledger(market_decision, price, self.bar_count, state)
         state["market_decision"] = market_decision
+        state["execution_view"] = execution_view
         trader_guide = dict(state.get("trader_guide") or {})
         trader_guide["market_decision"] = market_decision
         trader_guide["decision_ledger"] = decision_ledger
+        trader_guide["execution_view"] = execution_view
         state["trader_guide"] = trader_guide
         state["decision_ledger"] = decision_ledger
         state["decision_stats"] = self._decision_stats()
@@ -900,6 +967,7 @@ class SignalDashboardServer:
             "signals": signals_payload[:15],
             "ghost_signals": self._latest_ghost_signals[:8],
             "market_decision": market_decision,
+            "execution": execution_view,
             "decision_ledger": decision_ledger,
             "decision_stats": state["decision_stats"],
             "resolved": self.resolved_signals[-10:],
