@@ -862,6 +862,7 @@ class SignalDashboardServer:
             return
 
         now = time.time()
+        price = float(self.current_price or 0.0)
         if now - self._last_local_emit < self._min_local_emit_sec:
             return
 
