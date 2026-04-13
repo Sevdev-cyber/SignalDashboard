@@ -1,0 +1,420 @@
+//@version=6
+indicator("MNQ Smart Zones + LLM Context", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
+
+// ═══════════════════════════════════════════════════════════════
+// MNQ SMART ZONES — Probability zones + Structure + LLM readable
+//
+// 1. Kill Zones (time-based high probability windows)
+// 2. Liquidity Pools (above/below swing H/L — likely sweeps)
+// 3. Order Blocks (last opposite candle before impulse)
+// 4. FVGs (Fair Value Gaps) — unfilled imbalances
+// 5. VWAP bands (±1σ, ±2σ — mean reversion zones)
+// 6. Session levels (NY Open, London, Asia, prev day H/L/C)
+// 7. Weekly structure (prev week H/L/mid — magnet levels)
+// 8. Market Structure (BOS / CHOCH markers)
+// 9. LLM Summary Panel (all data as readable text)
+// ═══════════════════════════════════════════════════════════════
+
+// ── INPUTS ──
+grp_zones = "Probability Zones"
+show_kill_zones  = input.bool(true, "Kill Zones (time windows)", group=grp_zones)
+show_liquidity   = input.bool(true, "Liquidity Pools (sweep targets)", group=grp_zones)
+show_order_block = input.bool(true, "Order Blocks (supply/demand)", group=grp_zones)
+show_fvg         = input.bool(true, "Fair Value Gaps", group=grp_zones)
+show_vwap_bands  = input.bool(true, "VWAP ±1σ/±2σ Bands", group=grp_zones)
+
+grp_levels = "Key Levels"
+show_sessions    = input.bool(true, "Session Opens (NY/Lon/Asia)", group=grp_levels)
+show_weekly      = input.bool(true, "Weekly H/L/Mid", group=grp_levels)
+show_daily       = input.bool(true, "Previous Day H/L/C", group=grp_levels)
+show_ib          = input.bool(true, "Initial Balance (9:30-10:00)", group=grp_levels)
+
+grp_structure = "Market Structure"
+show_bos         = input.bool(true, "BOS / CHOCH markers", group=grp_structure)
+show_trend       = input.bool(true, "Trend bias arrow", group=grp_structure)
+swing_lookback   = input.int(5, "Swing Lookback", minval=3, maxval=20, group=grp_structure)
+
+grp_llm = "LLM Output"
+show_summary     = input.bool(true, "LLM Summary Panel", group=grp_llm)
+fvg_min_ticks    = input.int(2, "FVG Min Ticks", minval=1, group=grp_llm)
+
+// ── COLORS ──
+col_kill_ny_am   = color.new(#3b82f6, 88)
+col_kill_lon     = color.new(#f59e0b, 90)
+col_kill_power   = color.new(#8b5cf6, 88)
+col_liq_buy      = color.new(#10b981, 75)
+col_liq_sell     = color.new(#ef4444, 75)
+col_ob_bull      = color.new(#10b981, 82)
+col_ob_bear      = color.new(#ef4444, 82)
+col_fvg_bull     = color.new(#06b6d4, 87)
+col_fvg_bear     = color.new(#f59e0b, 87)
+
+// ── TIME HELPERS ──
+et_hour = hour(time, "America/New_York")
+et_min  = minute(time, "America/New_York")
+et_dow  = dayofweek(time, "America/New_York")
+
+// ═══════════════════════════════════════════════════════════════
+// 1. KILL ZONES — high probability time windows
+// ═══════════════════════════════════════════════════════════════
+
+is_ny_am_kill    = et_hour >= 9 and et_hour < 11        // 9:00-11:00 ET — best session
+is_london_kill   = et_hour >= 3 and et_hour < 5         // 3:00-5:00 ET — London open
+is_power_hour    = et_hour >= 14 and et_hour < 16       // 2:00-4:00 PM ET — power hour
+is_lunch_chop    = et_hour >= 12 and et_hour < 14       // noon-2pm — avoid
+
+if show_kill_zones
+    bgcolor(is_ny_am_kill ? col_kill_ny_am : na, title="NY AM Kill Zone")
+    bgcolor(is_london_kill ? col_kill_lon : na, title="London Kill Zone")
+    bgcolor(is_power_hour ? col_kill_power : na, title="Power Hour")
+
+// ═══════════════════════════════════════════════════════════════
+// 2. LIQUIDITY POOLS — stop hunt targets
+// ═══════════════════════════════════════════════════════════════
+
+// Find swing highs and lows
+swing_hi = ta.pivothigh(high, swing_lookback, swing_lookback)
+swing_lo = ta.pivotlow(low, swing_lookback, swing_lookback)
+
+var float[] liq_highs = array.new_float()
+var float[] liq_lows = array.new_float()
+var int[] liq_hi_bars = array.new_int()
+var int[] liq_lo_bars = array.new_int()
+var line[] liq_hi_lines = array.new_line()
+var line[] liq_lo_lines = array.new_line()
+
+if show_liquidity
+    if not na(swing_hi)
+        array.push(liq_highs, swing_hi)
+        array.push(liq_hi_bars, bar_index - swing_lookback)
+        l = line.new(bar_index - swing_lookback, swing_hi, bar_index + 20, swing_hi,
+             color=col_liq_sell, style=line.style_dotted, width=1)
+        array.push(liq_hi_lines, l)
+        label.new(bar_index - swing_lookback, swing_hi, "LQ$",
+             style=label.style_label_down, color=col_liq_sell, textcolor=color.white, size=size.tiny)
+
+    if not na(swing_lo)
+        array.push(liq_lows, swing_lo)
+        array.push(liq_lo_bars, bar_index - swing_lookback)
+        l = line.new(bar_index - swing_lookback, swing_lo, bar_index + 20, swing_lo,
+             color=col_liq_buy, style=line.style_dotted, width=1)
+        array.push(liq_lo_lines, l)
+        label.new(bar_index - swing_lookback, swing_lo, "LQ$",
+             style=label.style_label_up, color=col_liq_buy, textcolor=color.white, size=size.tiny)
+
+    // Remove swept liquidity
+    if array.size(liq_highs) > 0
+        for i = array.size(liq_highs) - 1 to 0
+            if i < array.size(liq_highs) and high > array.get(liq_highs, i)
+                line.delete(array.get(liq_hi_lines, i))
+                array.remove(liq_highs, i)
+                array.remove(liq_hi_bars, i)
+                array.remove(liq_hi_lines, i)
+    if array.size(liq_lows) > 0
+        for i = array.size(liq_lows) - 1 to 0
+            if i < array.size(liq_lows) and low < array.get(liq_lows, i)
+                line.delete(array.get(liq_lo_lines, i))
+                array.remove(liq_lows, i)
+                array.remove(liq_lo_bars, i)
+                array.remove(liq_lo_lines, i)
+
+    // Keep max 10
+    while array.size(liq_highs) > 10
+        line.delete(array.get(liq_hi_lines, 0))
+        array.remove(liq_highs, 0)
+        array.remove(liq_hi_bars, 0)
+        array.remove(liq_hi_lines, 0)
+    while array.size(liq_lows) > 10
+        line.delete(array.get(liq_lo_lines, 0))
+        array.remove(liq_lows, 0)
+        array.remove(liq_lo_bars, 0)
+        array.remove(liq_lo_lines, 0)
+
+// ═══════════════════════════════════════════════════════════════
+// 3. ORDER BLOCKS — last opposite candle before impulse
+// ═══════════════════════════════════════════════════════════════
+
+var box[] ob_boxes = array.new_box()
+var int[] ob_dirs = array.new_int()
+
+if show_order_block and bar_index >= 3
+    // Bullish OB: bearish candle → strong bullish move (close[1]<open[1] AND close>high[1])
+    bull_ob = close[1] < open[1] and close > high[1] and (close - open) > ta.atr(14) * 0.5
+    // Bearish OB: bullish candle → strong bearish move
+    bear_ob = close[1] > open[1] and close < low[1] and (open - close) > ta.atr(14) * 0.5
+
+    if bull_ob
+        b = box.new(bar_index - 1, high[1], bar_index + 30, low[1],
+             bgcolor=col_ob_bull, border_color=color.new(#10b981, 50), border_width=1)
+        array.push(ob_boxes, b)
+        array.push(ob_dirs, 1)
+    if bear_ob
+        b = box.new(bar_index - 1, high[1], bar_index + 30, low[1],
+             bgcolor=col_ob_bear, border_color=color.new(#ef4444, 50), border_width=1)
+        array.push(ob_boxes, b)
+        array.push(ob_dirs, -1)
+
+    // Remove mitigated OBs (price returned through them)
+    if array.size(ob_boxes) > 0
+        for i = array.size(ob_boxes) - 1 to 0
+            if i < array.size(ob_boxes)
+                b = array.get(ob_boxes, i)
+                bt = box.get_top(b)
+                bb = box.get_bottom(b)
+                d = array.get(ob_dirs, i)
+                mitigated = (d == 1 and low < bb) or (d == -1 and high > bt)
+                if mitigated
+                    box.delete(b)
+                    array.remove(ob_boxes, i)
+                    array.remove(ob_dirs, i)
+                else
+                    box.set_right(b, bar_index + 10)
+    // Keep max 8
+    while array.size(ob_boxes) > 8
+        box.delete(array.get(ob_boxes, 0))
+        array.remove(ob_boxes, 0)
+        array.remove(ob_dirs, 0)
+
+// ═══════════════════════════════════════════════════════════════
+// 4. FVGs — Fair Value Gaps
+// ═══════════════════════════════════════════════════════════════
+
+var box[] fvg_boxes = array.new_box()
+var int[] fvg_dirs = array.new_int()
+var float[] fvg_tops = array.new_float()
+var float[] fvg_bots = array.new_float()
+
+tick_sz = syminfo.mintick
+fvg_min = fvg_min_ticks * tick_sz
+
+if show_fvg and bar_index >= 2
+    bull_gap = low - high[2]
+    bear_gap = low[2] - high
+
+    if bull_gap >= fvg_min
+        b = box.new(bar_index - 2, low, bar_index + 20, high[2], bgcolor=col_fvg_bull, border_color=color.new(#06b6d4, 60))
+        array.push(fvg_boxes, b)
+        array.push(fvg_dirs, 1)
+        array.push(fvg_tops, low)
+        array.push(fvg_bots, high[2])
+
+    if bear_gap >= fvg_min
+        b = box.new(bar_index - 2, low[2], bar_index + 20, high, bgcolor=col_fvg_bear, border_color=color.new(#f59e0b, 60))
+        array.push(fvg_boxes, b)
+        array.push(fvg_dirs, -1)
+        array.push(fvg_tops, low[2])
+        array.push(fvg_bots, high)
+
+    // Remove filled/expired
+    if array.size(fvg_boxes) > 0
+        for i = array.size(fvg_boxes) - 1 to 0
+            if i < array.size(fvg_boxes)
+                ft = array.get(fvg_tops, i)
+                fb = array.get(fvg_bots, i)
+                filled = (low <= ft and high >= fb)
+                if filled
+                    box.delete(array.get(fvg_boxes, i))
+                    array.remove(fvg_boxes, i)
+                    array.remove(fvg_dirs, i)
+                    array.remove(fvg_tops, i)
+                    array.remove(fvg_bots, i)
+                else
+                    box.set_right(array.get(fvg_boxes, i), bar_index + 5)
+
+    while array.size(fvg_boxes) > 15
+        box.delete(array.get(fvg_boxes, 0))
+        array.remove(fvg_boxes, 0)
+        array.remove(fvg_dirs, 0)
+        array.remove(fvg_tops, 0)
+        array.remove(fvg_bots, 0)
+
+// ═══════════════════════════════════════════════════════════════
+// 5. VWAP BANDS (±1σ, ±2σ)
+// ═══════════════════════════════════════════════════════════════
+
+vwap_val = ta.vwap(hlc3)
+vwap_std = ta.stdev(close - vwap_val, 20)
+
+vwap_p1 = vwap_val + vwap_std
+vwap_m1 = vwap_val - vwap_std
+vwap_p2 = vwap_val + vwap_std * 2
+vwap_m2 = vwap_val - vwap_std * 2
+
+plot(show_vwap_bands ? vwap_val : na, "VWAP", color=color.new(#f59e0b, 20), linewidth=2)
+p_vp1 = plot(show_vwap_bands ? vwap_p1 : na, "VWAP +1σ", color=color.new(#ef4444, 60))
+p_vm1 = plot(show_vwap_bands ? vwap_m1 : na, "VWAP -1σ", color=color.new(#10b981, 60))
+p_vp2 = plot(show_vwap_bands ? vwap_p2 : na, "VWAP +2σ", color=color.new(#ef4444, 80))
+p_vm2 = plot(show_vwap_bands ? vwap_m2 : na, "VWAP -2σ", color=color.new(#10b981, 80))
+fill(p_vp1, p_vm1, color=color.new(#f59e0b, 95), title="VWAP ±1σ Band")
+
+// ═══════════════════════════════════════════════════════════════
+// 6. SESSION LEVELS
+// ═══════════════════════════════════════════════════════════════
+
+ny_open_now = et_hour == 9 and et_min >= 30 and et_min < 35
+ny_close_now = et_hour == 16 and et_min < 5
+london_now = et_hour == 3 and hour(time[1], "America/New_York") != 3
+
+if show_sessions
+    if ny_open_now
+        line.new(bar_index, high, bar_index, low, color=color.new(#3b82f6, 20), width=2, extend=extend.both)
+        label.new(bar_index, high, "NY OPEN 9:30", style=label.style_label_down, color=color.new(#3b82f6, 20), textcolor=color.white, size=size.small)
+    if ny_close_now
+        line.new(bar_index, high, bar_index, low, color=color.new(#8b5cf6, 30), width=1, style=line.style_dashed, extend=extend.both)
+    if london_now
+        label.new(bar_index, high, "LON", style=label.style_label_down, color=color.new(#f59e0b, 40), textcolor=color.white, size=size.tiny)
+
+// Weekly & Daily levels
+[pw_high, pw_low, pw_close] = request.security(syminfo.tickerid, "W", [high[1], low[1], close[1]], lookahead=barmerge.lookahead_on)
+pw_mid = (pw_high + pw_low) / 2
+[pd_high, pd_low, pd_close] = request.security(syminfo.tickerid, "D", [high[1], low[1], close[1]], lookahead=barmerge.lookahead_on)
+
+plot(show_weekly ? pw_high : na, "PW High", color=color.new(#ef4444, 40), style=plot.style_circles)
+plot(show_weekly ? pw_low : na, "PW Low", color=color.new(#10b981, 40), style=plot.style_circles)
+plot(show_weekly ? pw_mid : na, "PW Mid", color=color.new(#94a3b8, 60), style=plot.style_cross)
+plot(show_daily ? pd_high : na, "PD High", color=color.new(#ef4444, 60), style=plot.style_cross)
+plot(show_daily ? pd_low : na, "PD Low", color=color.new(#10b981, 60), style=plot.style_cross)
+
+// ═══════════════════════════════════════════════════════════════
+// 7. INITIAL BALANCE (9:30-10:00 ET)
+// ═══════════════════════════════════════════════════════════════
+
+var float ib_high = na
+var float ib_low = na
+var bool ib_set = false
+
+is_ib_period = et_hour == 9 and et_min >= 30
+is_after_ib = et_hour >= 10
+
+if et_hour == 9 and et_min >= 30 and et_min < 35
+    if na(ib_high) or dayofweek != dayofweek[1]
+        ib_high := high
+        ib_low := low
+        ib_set := false
+
+if is_ib_period and not ib_set
+    ib_high := math.max(nz(ib_high, high), high)
+    ib_low := math.min(nz(ib_low, low), low)
+
+if et_hour == 10 and et_min < 5 and not ib_set
+    ib_set := true
+
+plot(show_ib and ib_set ? ib_high : na, "IB High", color=color.new(#3b82f6, 40), style=plot.style_stepline)
+plot(show_ib and ib_set ? ib_low : na, "IB Low", color=color.new(#3b82f6, 40), style=plot.style_stepline)
+
+// ═══════════════════════════════════════════════════════════════
+// 8. MARKET STRUCTURE — BOS / CHOCH
+// ═══════════════════════════════════════════════════════════════
+
+var float last_swing_hi = na
+var float last_swing_lo = na
+var int structure_dir = 0  // 1=bull, -1=bear
+
+if show_bos
+    if not na(swing_hi)
+        if not na(last_swing_hi) and swing_hi > last_swing_hi and structure_dir != 1
+            label.new(bar_index - swing_lookback, swing_hi, "BOS▲",
+                 style=label.style_label_down, color=color.new(#10b981, 30),
+                 textcolor=color.white, size=size.tiny)
+            structure_dir := 1
+        last_swing_hi := swing_hi
+
+    if not na(swing_lo)
+        if not na(last_swing_lo) and swing_lo < last_swing_lo and structure_dir != -1
+            label.new(bar_index - swing_lookback, swing_lo, "BOS▼",
+                 style=label.style_label_up, color=color.new(#ef4444, 30),
+                 textcolor=color.white, size=size.tiny)
+            structure_dir := -1
+        last_swing_lo := swing_lo
+
+// Trend arrow
+ema_fast = ta.ema(close, 20)
+ema_slow = ta.ema(close, 50)
+trend_bull = ema_fast > ema_slow
+trend_str = trend_bull ? "BULL ▲" : "BEAR ▼"
+
+if show_trend
+    plotchar(trend_bull and not trend_bull[1], "Trend → Bull", "▲", location.belowbar, color=color.new(#10b981, 50), size=size.tiny)
+    plotchar(not trend_bull and trend_bull[1], "Trend → Bear", "▼", location.abovebar, color=color.new(#ef4444, 50), size=size.tiny)
+
+// ═══════════════════════════════════════════════════════════════
+// 9. LLM SUMMARY PANEL
+// ═══════════════════════════════════════════════════════════════
+
+if show_summary and barstate.islast
+    atr14 = ta.atr(14)
+    rsi14 = ta.rsi(close, 14)
+    vwap_sigma = vwap_std > 0 ? (close - vwap_val) / vwap_std : 0
+
+    // Count zones
+    n_bull_fvg = 0
+    n_bear_fvg = 0
+    nearest_fvg = 9999.0
+    if array.size(fvg_dirs) > 0
+        for i = 0 to math.max(0, array.size(fvg_dirs) - 1)
+            if i < array.size(fvg_dirs)
+                if array.get(fvg_dirs, i) == 1
+                    n_bull_fvg += 1
+                else
+                    n_bear_fvg += 1
+                mid = (array.get(fvg_tops, i) + array.get(fvg_bots, i)) / 2
+                nearest_fvg := math.min(nearest_fvg, math.abs(close - mid))
+
+    n_bull_ob = 0
+    n_bear_ob = 0
+    if array.size(ob_dirs) > 0
+        for i = 0 to math.max(0, array.size(ob_dirs) - 1)
+            if i < array.size(ob_dirs)
+                if array.get(ob_dirs, i) == 1
+                    n_bull_ob += 1
+                else
+                    n_bear_ob += 1
+
+    n_liq_above = array.size(liq_highs)
+    n_liq_below = array.size(liq_lows)
+    nearest_liq_above = 9999.0
+    nearest_liq_below = 9999.0
+    if n_liq_above > 0
+        for i = 0 to n_liq_above - 1
+            nearest_liq_above := math.min(nearest_liq_above, array.get(liq_highs, i) - close)
+    if n_liq_below > 0
+        for i = 0 to n_liq_below - 1
+            nearest_liq_below := math.min(nearest_liq_below, close - array.get(liq_lows, i))
+
+    // Session & kill zone
+    kz = is_ny_am_kill ? "NY AM KILL ⚡" : is_power_hour ? "POWER HOUR ⚡" : is_london_kill ? "LONDON KILL" : is_lunch_chop ? "LUNCH ⚠" : "STANDARD"
+    session = et_hour >= 9 and et_hour < 16 ? "NY RTH" : et_hour >= 3 and et_hour < 9 ? "LON" : "OVERNIGHT"
+
+    // IB status
+    ib_status = "not set"
+    if ib_set
+        if close > ib_high
+            ib_status = "ABOVE IB (breakout)"
+        else if close < ib_low
+            ib_status = "BELOW IB (breakdown)"
+        else
+            ib_status = "INSIDE IB (range)"
+
+    s = "═══ SMART ZONES ═══\n"
+    s += syminfo.ticker + " " + timeframe.period + " | " + kz + "\n"
+    s += "Price: " + str.tostring(close, "#.##") + " | " + trend_str + "\n"
+    s += "ATR: " + str.tostring(atr14, "#.#") + " RSI: " + str.tostring(rsi14, "#.#") + "\n"
+    s += "VWAP: " + str.tostring(vwap_val, "#.##") + " (" + str.tostring(vwap_sigma, "#.#") + "σ)\n"
+    s += "───── ZONES ─────\n"
+    s += "FVG: " + str.tostring(n_bull_fvg) + "↑ " + str.tostring(n_bear_fvg) + "↓"
+    s += (nearest_fvg < 9999 ? " near:" + str.tostring(nearest_fvg, "#") + "pt" : "") + "\n"
+    s += "OB:  " + str.tostring(n_bull_ob) + "↑ " + str.tostring(n_bear_ob) + "↓\n"
+    s += "LIQ: " + str.tostring(n_liq_above) + "↑(" + (nearest_liq_above < 9999 ? str.tostring(nearest_liq_above, "#") : "—") + "pt) "
+    s += str.tostring(n_liq_below) + "↓(" + (nearest_liq_below < 9999 ? str.tostring(nearest_liq_below, "#") : "—") + "pt)\n"
+    s += "───── LEVELS ─────\n"
+    s += "PW H: " + str.tostring(pw_high, "#.#") + " L: " + str.tostring(pw_low, "#.#") + "\n"
+    s += "PD H: " + str.tostring(pd_high, "#.#") + " L: " + str.tostring(pd_low, "#.#") + "\n"
+    s += "IB: " + ib_status + "\n"
+    s += "═══════════════════"
+
+    label.new(bar_index + 3, high + atr14 * 0.5, s,
+         style=label.style_label_left,
+         color=color.new(#0a0e1a, 5),
+         textcolor=color.new(#e2e8f0, 0),
+         textalign=text.align_left,
+         size=size.normal)
