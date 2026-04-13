@@ -1126,6 +1126,8 @@ function renderGuideOverlay() {
 
   const bandWidth = Math.min(220, width * 0.26);
   const x = Math.max(12, width - bandWidth - 18);
+  const labelAnchors = [];
+  const minLabelGap = 18;
 
   zones.forEach((zone, idx) => {
     const low = Number(zone.low);
@@ -1158,13 +1160,41 @@ function renderGuideOverlay() {
       stroke, 'stroke-width': 1.2, opacity: 0.5
     }));
 
+    let labelY = Math.max(14, top + 12);
+    labelAnchors.forEach(existingY => {
+      if (Math.abs(labelY - existingY) < minLabelGap) {
+        labelY = existingY + minLabelGap;
+      }
+    });
+    labelY = Math.min(height - 8, labelY);
+    labelAnchors.push(labelY);
+    labelAnchors.sort((a, b) => a - b);
+
+    const stageText = zone.stage ? `${zone.stage.toUpperCase()} ` : '';
+    const zoneName = String(zone.label || 'Zone');
+    const shortName = zoneName.length > 18 ? `${zoneName.slice(0, 18)}…` : zoneName;
+    const labelText = `${stageText}${shortName} ${low.toFixed(2)}-${high.toFixed(2)}`;
+
+    predOverlay.appendChild(svgEl('rect', {
+      x: x + 4,
+      y: labelY - 10,
+      width: Math.min(bandWidth - 8, Math.max(88, labelText.length * 6.2)),
+      height: 14,
+      rx: 4,
+      ry: 4,
+      fill: 'rgba(15,23,42,0.72)',
+      stroke: 'rgba(255,255,255,0.06)',
+      'stroke-width': 0.8,
+      opacity: 0.95
+    }));
+
     const label = svgEl('text', {
-      x: x + 8, y: Math.max(14, top + 12),
+      x: x + 8, y: labelY,
       fill: palette.text,
       'font-size': 10, 'font-family': 'JetBrains Mono, monospace',
       'font-weight': 700, opacity: 0.95
     });
-    label.textContent = `${zone.stage ? `${zone.stage.toUpperCase()} ` : ''}${zone.label || 'Zone'} ${low.toFixed(2)}-${high.toFixed(2)}`;
+    label.textContent = labelText;
     predOverlay.appendChild(label);
   });
 }
