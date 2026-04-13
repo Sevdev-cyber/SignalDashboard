@@ -232,11 +232,17 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg-primary);color
 .guide-zone-item.long,.guide-zone-item.neutral_to_long{border-color:rgba(16,185,129,.25)}
 .guide-zone-item.short,.guide-zone-item.neutral_to_short{border-color:rgba(239,68,68,.25)}
 .guide-zone-item.neutral{border-color:rgba(148,163,184,.22)}
+.guide-zone-item.predicted{background:linear-gradient(135deg,rgba(255,255,255,.03),rgba(59,130,246,.08))}
+.guide-zone-item.watch{background:linear-gradient(135deg,rgba(255,255,255,.03),rgba(245,158,11,.09))}
+.guide-zone-item.trigger{background:linear-gradient(135deg,rgba(255,255,255,.03),rgba(16,185,129,.10))}
+.guide-zone-item.trigger.short{background:linear-gradient(135deg,rgba(255,255,255,.03),rgba(239,68,68,.10))}
+.guide-zone-item.reversal{background:linear-gradient(135deg,rgba(255,255,255,.03),rgba(168,85,247,.08))}
 .guide-focus-list{display:flex;flex-direction:column;gap:8px;margin-bottom:10px}
 .guide-focus{padding:9px 10px;border-radius:var(--radius-sm);background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.06)}
 .guide-focus.long{border-color:rgba(16,185,129,.25)}
 .guide-focus.short{border-color:rgba(239,68,68,.25)}
 .guide-focus.neutral{border-color:rgba(148,163,184,.22)}
+.guide-focus.predicted{background:linear-gradient(135deg,rgba(255,255,255,.03),rgba(56,189,248,.08))}
 .guide-focus-title{font-size:.7rem;text-transform:uppercase;color:var(--text-muted);margin-bottom:4px}
 .guide-focus-main{font-size:.75rem;font-weight:700;color:var(--text-primary);margin-bottom:3px}
 .guide-focus-sub{font-size:.68rem;line-height:1.35;color:var(--text-muted)}
@@ -244,6 +250,11 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg-primary);color
 .guide-zone-label{font-size:.75rem;font-weight:700}
 .guide-zone-range{font-family:'JetBrains Mono',monospace;font-size:.72rem;color:var(--text-primary)}
 .guide-zone-why{font-size:.68rem;line-height:1.35;color:var(--text-muted)}
+.guide-zone-stage{font-family:'JetBrains Mono',monospace;font-size:.63rem;padding:2px 6px;border-radius:999px;border:1px solid rgba(255,255,255,.12);text-transform:uppercase;letter-spacing:.4px}
+.guide-zone-stage.predicted{color:#7dd3fc;border-color:rgba(56,189,248,.35);background:rgba(56,189,248,.10)}
+.guide-zone-stage.watch{color:#fcd34d;border-color:rgba(245,158,11,.35);background:rgba(245,158,11,.10)}
+.guide-zone-stage.trigger{color:#86efac;border-color:rgba(16,185,129,.35);background:rgba(16,185,129,.10)}
+.guide-zone-stage.reversal{color:#d8b4fe;border-color:rgba(168,85,247,.35);background:rgba(168,85,247,.10)}
 .guide-empty{font-size:.78rem;color:var(--text-muted);text-align:center;padding:8px}
 .guide-l2{padding:9px 10px;border-radius:var(--radius-sm);background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.06);margin-bottom:10px}
 .guide-l2-title{font-size:.7rem;text-transform:uppercase;color:var(--text-muted);margin-bottom:4px}
@@ -1164,7 +1175,7 @@ function updateGuide(guide) {
   }
   if (guide.prediction) {
     focusItems.push(`
-      <div class="guide-focus ${guide.prediction.side || 'neutral'}">
+      <div class="guide-focus predicted ${guide.prediction.side || 'neutral'}">
         <div class="guide-focus-title">Predicted Area</div>
         <div class="guide-focus-main">${guide.prediction.message || ''}</div>
         <div class="guide-focus-sub">Watch ${Number(guide.prediction.watch_low || 0).toFixed(2)} - ${Number(guide.prediction.watch_high || 0).toFixed(2)} · trigger ${Number(guide.prediction.trigger || 0).toFixed(2)}</div>
@@ -1208,9 +1219,10 @@ function updateGuide(guide) {
     return;
   }
   zones.innerHTML = guide.zones.map(z => `
-    <div class="guide-zone-item ${z.direction || 'neutral'}">
+    <div class="guide-zone-item ${z.direction || 'neutral'} ${z.stage || ''}">
       <div class="guide-zone-top">
-        <div class="guide-zone-label">${z.label || 'Zone'}${z.stage ? ` · ${z.stage}` : ''}</div>
+        <div class="guide-zone-label">${z.label || 'Zone'}</div>
+        ${z.stage ? `<div class="guide-zone-stage ${z.stage}">${z.stage}</div>` : ''}
         <div class="guide-zone-range">${Number(z.low).toFixed(2)} - ${Number(z.high).toFixed(2)}</div>
       </div>
       <div class="guide-zone-why">${z.why || ''}${z.trigger ? ` Trigger ${Number(z.trigger).toFixed(2)}.` : ''}</div>
