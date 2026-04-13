@@ -1246,6 +1246,20 @@ function assessmentTone(assessment) {
   return { bg: 'rgba(148,163,184,0.12)', fg: '#cbd5e1', border: 'rgba(148,163,184,0.28)' };
 }
 
+function normalizeTraderGuide(guide) {
+  if (!guide || typeof guide !== 'object') return null;
+  const tf5 = guide.tf_5m || guide.guide_5m || (Array.isArray(guide.timeframes) ? guide.timeframes[0] : null) || null;
+  const tf15 = guide.tf_15m || guide.guide_15m || (Array.isArray(guide.timeframes) ? guide.timeframes[1] : null) || null;
+  return {
+    ...guide,
+    tf_5m: tf5,
+    tf_15m: tf15,
+    guide_5m: tf5,
+    guide_15m: tf15,
+    timeframes: Array.isArray(guide.timeframes) && guide.timeframes.length ? guide.timeframes : [tf5, tf15],
+  };
+}
+
 function formatDecisionZone(zone) {
   if (!zone) return null;
   const low = Number(zone.low);
@@ -1967,231 +1981,244 @@ function updateIndicators(s) {
 }
 
 function updateGuide(guide) {
-  const overall = $('guideOverall');
-  const decisionBox = $('decisionBox');
-  const decisionConf = $('decisionConf');
-  const grid = $('guideGrid');
-  const focus = $('guideFocus');
-  const l2 = $('guideL2');
-  const zones = $('guideZones');
-  if (!overall || !grid || !focus || !l2 || !zones || !decisionBox || !decisionConf) return;
-  latestGuide = guide || null;
-  if (!guide) {
-    overall.innerHTML = '<div class="guide-summary">Brak guide jeszcze.</div>';
-    decisionBox.innerHTML = `
-      <div class="decision-head">
-        <div class="decision-action wait">WAIT</div>
-        <div class="guide-conf" id="decisionConf">conf 0%</div>
-      </div>
-      <div class="decision-summary">Bot decision waiting for snapshot…</div>
-    `;
-    grid.innerHTML = '<div class="guide-card"><div class="guide-card-note">No 5m guide yet</div></div><div class="guide-card"><div class="guide-card-note">No 15m guide yet</div></div>';
-    focus.innerHTML = '<div class="guide-empty">Waiting for continuation / invalidation…</div>';
-    l2.innerHTML = '<div class="guide-l2-sub">Waiting for live bid/ask reaction…</div>';
-    zones.innerHTML = '<div class="guide-empty">Waiting for probable zones…</div>';
-    renderGuideHud(null);
-    renderPredSVG();
-    return;
-  }
+  try {
+    const overall = $('guideOverall');
+    const decisionBox = $('decisionBox');
+    const grid = $('guideGrid');
+    const focus = $('guideFocus');
+    const l2 = $('guideL2');
+    const zones = $('guideZones');
+    if (!overall || !grid || !focus || !l2 || !zones || !decisionBox) return;
 
-  const overallStable = stabilizeBiasFlip('overall_bias', guide.overall_bias || 'neutral', guide.confidence || 0, {
-    minFlipCount: 2,
-    hardEdge: 18,
-    softFloor: 58,
-  });
-  guide.display_overall_bias = overallStable.bias || guide.overall_bias || 'neutral';
-  guide.display_confidence = overallStable.confidence || guide.confidence || 0;
+    const normalized = normalizeTraderGuide(guide);
+    latestGuide = normalized || null;
+    if (!normalized) {
+      overall.innerHTML = '<div class="guide-summary">Brak guide jeszcze.</div>';
+      decisionBox.innerHTML = `
+        <div class="decision-head">
+          <div class="decision-action wait">WAIT</div>
+          <div class="guide-conf" id="decisionConf">conf 0%</div>
+        </div>
+        <div class="decision-summary">Bot decision waiting for snapshot…</div>
+      `;
+      grid.innerHTML = '<div class="guide-card"><div class="guide-card-note">No 5m guide yet</div></div><div class="guide-card"><div class="guide-card-note">No 15m guide yet</div></div>';
+      focus.innerHTML = '<div class="guide-empty">Waiting for continuation / invalidation…</div>';
+      l2.innerHTML = '<div class="guide-l2-sub">Waiting for live bid/ask reaction…</div>';
+      zones.innerHTML = '<div class="guide-empty">Waiting for probable zones…</div>';
+      renderGuideHud(null);
+      renderPredSVG();
+      return;
+    }
 
-  const decision = guide.market_decision || null;
-  const ledger = Array.isArray(guide.decision_ledger) ? guide.decision_ledger : [];
-  const stats = guide.decision_stats || {};
-  if (decision) {
-    const actionClass = String(decision.action || decision.bias || 'wait').toLowerCase();
-    const confidence = decision.confidence != null ? decision.confidence : 0;
-    const assessment = decision.assessment || {};
-    const assessmentClass = String(assessment.state || 'pending').toLowerCase();
-    const assessmentLabel = String(assessment.label || assessment.state || 'pending').toUpperCase();
-    const assessmentReason = assessment.reason || 'Waiting for enough data.';
-    const trigger = decision.trigger_level != null ? Number(decision.trigger_level).toFixed(2) : '—';
-    const invalid = decision.invalidation_level != null ? Number(decision.invalidation_level).toFixed(2) : '—';
-    const entry = decision.entry_zone && decision.entry_zone.low != null && decision.entry_zone.high != null
-      ? `${Number(decision.entry_zone.low).toFixed(2)}-${Number(decision.entry_zone.high).toFixed(2)}`
-      : '—';
-    const target = decision.target_zone && decision.target_zone.low != null && decision.target_zone.high != null
-      ? `${Number(decision.target_zone.low).toFixed(2)}-${Number(decision.target_zone.high).toFixed(2)}`
-      : '—';
-    const support = Array.isArray(decision.supporting_signals) && decision.supporting_signals.length
-      ? decision.supporting_signals.slice(0, 4).join(' · ')
-      : 'none';
-    const recentLedger = ledger.slice(-5).reverse().map((item) => {
-      const state = String(item.state || item.outcome || 'pending').toLowerCase();
-      const label = String(item.state || item.outcome || 'pending').toUpperCase();
-      const toneClass = state === 'good' ? 'good' : state === 'bad' ? 'bad' : state === 'weak' ? 'warn' : 'warn';
-      const score = Number.isFinite(Number(item.score)) ? Number(item.score) : 0;
-      const price = item.created_price != null ? Number(item.created_price).toFixed(2) : '—';
-      const summary = item.summary || item.scenario || 'decision';
-      return `<span class="decision-chip ${toneClass}" style="display:inline-flex;gap:4px;align-items:center">${label} ${score} • ${price} • ${summary.slice(0, 18)}${summary.length > 18 ? '…' : ''}</span>`;
-    }).join('');
-    decisionBox.innerHTML = `
-      <div class="decision-head">
-        <div class="decision-action ${actionClass}">${decision.action || 'wait'}</div>
-        <div class="guide-conf">conf ${confidence}%</div>
-      </div>
-      <div class="decision-summary">${decision.summary || 'No decision summary.'}</div>
-      <div class="decision-meta">
-        <span class="decision-chip ${decision.bias === 'long' || decision.bias === 'short' ? 'good' : 'warn'}">bias ${prettyBias(decision.bias || 'neutral')}</span>
-        <span class="decision-chip">trigger ${trigger}</span>
-        <span class="decision-chip">invalid ${invalid}</span>
-        <span class="decision-chip">entry ${entry}</span>
-        <span class="decision-chip">target ${target}</span>
-        <span class="decision-chip ${confidence >= 75 ? 'good' : confidence >= 60 ? 'warn' : 'bad'}">support ${support}</span>
-        <span class="decision-chip" style="border-color:${assTone.border};background:${assTone.bg};color:${assTone.fg}">outcome ${assessmentLabel}</span>
-      </div>
-      <div class="decision-summary" style="margin-top:6px;font-size:.72rem;opacity:.92">result: ${assessmentReason}</div>
-      <div style="margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,.06)">
-        <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:6px">
-          <span style="font-size:.62rem;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted)">Decision ledger</span>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:.68rem;color:var(--text-muted)">win ${stats.win_rate || 0}% · good ${stats.good || 0} / ${stats.resolved || 0}</span>
-        </div>
-        <div style="display:flex;flex-wrap:wrap;gap:6px">
-          ${recentLedger || '<span class="decision-chip">No resolved decisions yet</span>'}
-        </div>
-      </div>
-    `;
-    decisionConf.textContent = `conf ${confidence}%`;
-  } else {
-    const recentLedger = ledger.slice(-5).reverse().map((item) => {
-      const state = String(item.state || item.outcome || 'pending').toLowerCase();
-      const label = String(item.state || item.outcome || 'pending').toUpperCase();
-      const toneClass = state === 'good' ? 'good' : state === 'bad' ? 'bad' : state === 'weak' ? 'warn' : 'warn';
-      const score = Number.isFinite(Number(item.score)) ? Number(item.score) : 0;
-      const price = item.created_price != null ? Number(item.created_price).toFixed(2) : '—';
-      const summary = item.summary || item.scenario || 'decision';
-      return `<span class="decision-chip ${toneClass}" style="display:inline-flex;gap:4px;align-items:center">${label} ${score} • ${price} • ${summary.slice(0, 18)}${summary.length > 18 ? '…' : ''}</span>`;
-    }).join('');
-    decisionBox.innerHTML = `
-      <div class="decision-head">
-        <div class="decision-action wait">WAIT</div>
-        <div class="guide-conf" id="decisionConf">conf 0%</div>
-      </div>
-      <div class="decision-summary">Bot decision waiting for snapshot…</div>
-      <div style="margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,.06)">
-        <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:6px">
-          <span style="font-size:.62rem;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted)">Decision ledger</span>
-          <span style="font-family:'JetBrains Mono',monospace;font-size:.68rem;color:var(--text-muted)">win ${stats.win_rate || 0}% · good ${stats.good || 0} / ${stats.resolved || 0}</span>
-        </div>
-        <div style="display:flex;flex-wrap:wrap;gap:6px">
-          ${recentLedger || '<span class="decision-chip">No resolved decisions yet</span>'}
-        </div>
-      </div>
-    `;
-  }
-
-  const l2Guide = guide.l2 ? { ...guide.l2 } : null;
-  if (l2Guide) {
-    const l2Stable = stabilizeBiasFlip('l2_bias', l2Guide.micro_bias || 'neutral', l2Guide.confidence || 0, {
-      minFlipCount: 3,
-      hardEdge: 16,
-      softFloor: 55,
+    const overallStable = stabilizeBiasFlip('overall_bias', normalized.overall_bias || 'neutral', normalized.confidence || 0, {
+      minFlipCount: 2,
+      hardEdge: 18,
+      softFloor: 58,
     });
-    l2Guide.display_bias = l2Stable.bias || l2Guide.micro_bias || 'neutral';
-    l2Guide.display_confidence = l2Stable.confidence || l2Guide.confidence || 0;
-    guide.l2 = l2Guide;
-  }
+    normalized.display_overall_bias = overallStable.bias || normalized.overall_bias || 'neutral';
+    normalized.display_confidence = overallStable.confidence || normalized.confidence || 0;
 
-  overall.innerHTML = `
-    <div class="guide-overall-header">
-      <div class="guide-bias ${guide.display_overall_bias || guide.overall_bias || 'neutral'}">${prettyBias(guide.display_overall_bias || guide.overall_bias)}</div>
-      <div class="guide-conf">conf ${guide.display_confidence || guide.confidence || 0}%</div>
-    </div>
-    <div class="guide-summary">${guide.summary || 'No summary.'}</div>
-    <div class="guide-card-note" style="margin-top:6px">Structure = 5m/15m context. Flow = tick/L2 reaction and can wobble faster inside the same structure.</div>
-  `;
+    const decision = normalized.market_decision || null;
+    const ledger = Array.isArray(normalized.decision_ledger) ? normalized.decision_ledger : [];
+    const stats = normalized.decision_stats || {};
+    const decisionConfEl = decisionBox.querySelector('#decisionConf') || $('decisionConf');
+    const renderLedger = () => ledger.slice(-5).reverse().map((item) => {
+      const state = String(item.state || item.outcome || 'pending').toLowerCase();
+      const label = String(item.state || item.outcome || 'pending').toUpperCase();
+      const toneClass = state === 'good' ? 'good' : state === 'bad' ? 'bad' : state === 'weak' ? 'warn' : 'warn';
+      const score = Number.isFinite(Number(item.score)) ? Number(item.score) : 0;
+      const price = item.created_price != null ? Number(item.created_price).toFixed(2) : '—';
+      const summary = item.summary || item.scenario || 'decision';
+      return `<span class="decision-chip ${toneClass}" style="display:inline-flex;gap:4px;align-items:center">${label} ${score} • ${price} • ${summary.slice(0, 18)}${summary.length > 18 ? '…' : ''}</span>`;
+    }).join('');
 
-  const cards = [guide.tf_5m, guide.tf_15m].map(tf => {
-    if (!tf) return '<div class="guide-card"><div class="guide-card-note">No timeframe guide.</div></div>';
-    return `
-      <div class="guide-card">
-        <div class="guide-card-head">
-          <div class="guide-tf">${tf.timeframe}</div>
-          <div class="guide-risk ${tf.reversal_risk || 'medium'}">${tf.reversal_risk || 'medium'} reversal</div>
+    if (decision) {
+      const actionClass = String(decision.action || decision.bias || 'wait').toLowerCase();
+      const confidence = decision.confidence != null ? decision.confidence : 0;
+      const assessment = decision.assessment || {};
+      const assessmentLabel = String(assessment.label || assessment.state || 'pending').toUpperCase();
+      const assessmentReason = assessment.reason || 'Waiting for enough data.';
+      const trigger = decision.trigger_level != null ? Number(decision.trigger_level).toFixed(2) : '—';
+      const invalid = decision.invalidation_level != null ? Number(decision.invalidation_level).toFixed(2) : '—';
+      const entry = decision.entry_zone && decision.entry_zone.low != null && decision.entry_zone.high != null
+        ? `${Number(decision.entry_zone.low).toFixed(2)}-${Number(decision.entry_zone.high).toFixed(2)}`
+        : '—';
+      const target = decision.target_zone && decision.target_zone.low != null && decision.target_zone.high != null
+        ? `${Number(decision.target_zone.low).toFixed(2)}-${Number(decision.target_zone.high).toFixed(2)}`
+        : '—';
+      const support = Array.isArray(decision.supporting_signals) && decision.supporting_signals.length
+        ? decision.supporting_signals.slice(0, 4).join(' · ')
+        : 'none';
+      const assTone = assessmentTone(assessment);
+      decisionBox.innerHTML = `
+        <div class="decision-head">
+          <div class="decision-action ${actionClass}">${decision.action || 'wait'}</div>
+          <div class="guide-conf">conf ${confidence}%</div>
         </div>
-        <div class="guide-card-line">Bias: <strong>${(tf.bias || 'neutral').replaceAll('_', ' ')}</strong> · trigger ${tf.trigger_level?.toFixed ? tf.trigger_level.toFixed(2) : tf.trigger_level}</div>
-        <div class="guide-card-note">${tf.continuation_note || ''}</div>
-        <div class="guide-card-note" style="margin-top:4px">${tf.reversal_note || ''}</div>
+        <div class="decision-summary">${decision.summary || 'No decision summary.'}</div>
+        <div class="decision-meta">
+          <span class="decision-chip ${decision.bias === 'long' || decision.bias === 'short' ? 'good' : 'warn'}">bias ${prettyBias(decision.bias || 'neutral')}</span>
+          <span class="decision-chip">trigger ${trigger}</span>
+          <span class="decision-chip">invalid ${invalid}</span>
+          <span class="decision-chip">entry ${entry}</span>
+          <span class="decision-chip">target ${target}</span>
+          <span class="decision-chip ${confidence >= 75 ? 'good' : confidence >= 60 ? 'warn' : 'bad'}">support ${support}</span>
+          <span class="decision-chip" style="border-color:${assTone.border};background:${assTone.bg};color:${assTone.fg}">outcome ${assessmentLabel}</span>
+        </div>
+        <div class="decision-summary" style="margin-top:6px;font-size:.72rem;opacity:.92">result: ${assessmentReason}</div>
+        <div style="margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,.06)">
+          <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:6px">
+            <span style="font-size:.62rem;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted)">Decision ledger</span>
+            <span style="font-family:'JetBrains Mono',monospace;font-size:.68rem;color:var(--text-muted)">win ${stats.win_rate || 0}% · good ${stats.good || 0} / ${stats.resolved || 0}</span>
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:6px">
+            ${renderLedger() || '<span class="decision-chip">No resolved decisions yet</span>'}
+          </div>
+        </div>
+      `;
+      if (decisionConfEl) decisionConfEl.textContent = `conf ${confidence}%`;
+    } else {
+      decisionBox.innerHTML = `
+        <div class="decision-head">
+          <div class="decision-action wait">WAIT</div>
+          <div class="guide-conf" id="decisionConf">conf 0%</div>
+        </div>
+        <div class="decision-summary">Bot decision waiting for snapshot…</div>
+        <div style="margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,.06)">
+          <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:6px">
+            <span style="font-size:.62rem;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted)">Decision ledger</span>
+            <span style="font-family:'JetBrains Mono',monospace;font-size:.68rem;color:var(--text-muted)">win ${stats.win_rate || 0}% · good ${stats.good || 0} / ${stats.resolved || 0}</span>
+          </div>
+          <div style="display:flex;flex-wrap:wrap;gap:6px">
+            ${renderLedger() || '<span class="decision-chip">No resolved decisions yet</span>'}
+          </div>
+        </div>
+      `;
+    }
+
+    const l2Guide = normalized.l2 ? { ...normalized.l2 } : null;
+    if (l2Guide) {
+      const l2Stable = stabilizeBiasFlip('l2_bias', l2Guide.micro_bias || 'neutral', l2Guide.confidence || 0, {
+        minFlipCount: 3,
+        hardEdge: 16,
+        softFloor: 55,
+      });
+      l2Guide.display_bias = l2Stable.bias || l2Guide.micro_bias || 'neutral';
+      l2Guide.display_confidence = l2Stable.confidence || l2Guide.confidence || 0;
+      normalized.l2 = l2Guide;
+    }
+
+    overall.innerHTML = `
+      <div class="guide-overall-header">
+        <div class="guide-bias ${normalized.display_overall_bias || normalized.overall_bias || 'neutral'}">${prettyBias(normalized.display_overall_bias || normalized.overall_bias)}</div>
+        <div class="guide-conf">conf ${normalized.display_confidence || normalized.confidence || 0}%</div>
       </div>
+      <div class="guide-summary">${normalized.summary || 'No summary.'}</div>
+      <div class="guide-card-note" style="margin-top:6px">Structure = 5m/15m context. Flow = tick/L2 reaction and can wobble faster inside the same structure.</div>
     `;
-  });
-  grid.innerHTML = cards.join('');
 
-  const focusItems = [];
-  if (guide.continuation) {
-    focusItems.push(`
-      <div class="guide-focus ${guide.continuation.side || 'neutral'}">
-        <div class="guide-focus-title">Continuation</div>
-        <div class="guide-focus-main">${guide.continuation.message || ''}</div>
-        <div class="guide-focus-sub">Invalidation: ${Number(guide.continuation.invalidation || 0).toFixed(2)}</div>
-      </div>
-    `);
-  }
-  if (guide.prediction) {
-    focusItems.push(`
-      <div class="guide-focus predicted ${guide.prediction.side || 'neutral'}">
-        <div class="guide-focus-title">Predicted Area</div>
-        <div class="guide-focus-main">${guide.prediction.message || ''}</div>
-        <div class="guide-focus-sub">Watch ${Number(guide.prediction.watch_low || 0).toFixed(2)} - ${Number(guide.prediction.watch_high || 0).toFixed(2)} · trigger ${Number(guide.prediction.trigger || 0).toFixed(2)}</div>
-      </div>
-    `);
-  }
-  if (guide.best_long_zone) {
-    focusItems.push(`
-      <div class="guide-focus long">
-        <div class="guide-focus-title">${guide.best_long_zone.label}</div>
-        <div class="guide-focus-main">${Number(guide.best_long_zone.low).toFixed(2)} - ${Number(guide.best_long_zone.high).toFixed(2)}</div>
-        <div class="guide-focus-sub">Invalidation ${Number(guide.best_long_zone.invalidation).toFixed(2)} · ${guide.best_long_zone.why || ''}</div>
-      </div>
-    `);
-  }
-  if (guide.best_short_zone) {
-    focusItems.push(`
-      <div class="guide-focus short">
-        <div class="guide-focus-title">${guide.best_short_zone.label}</div>
-        <div class="guide-focus-main">${Number(guide.best_short_zone.low).toFixed(2)} - ${Number(guide.best_short_zone.high).toFixed(2)}</div>
-        <div class="guide-focus-sub">Invalidation ${Number(guide.best_short_zone.invalidation).toFixed(2)} · ${guide.best_short_zone.why || ''}</div>
-      </div>
-    `);
-  }
-  focus.innerHTML = focusItems.length ? focusItems.join('') : '<div class="guide-empty">No focus zones yet.</div>';
+    const tfCards = [normalized.tf_5m, normalized.tf_15m].map(tf => {
+      if (!tf) return '<div class="guide-card"><div class="guide-card-note">No timeframe guide.</div></div>';
+      const triggerLevel = Number(tf.trigger_level);
+      return `
+        <div class="guide-card">
+          <div class="guide-card-head">
+            <div class="guide-tf">${tf.timeframe || 'TF'}</div>
+            <div class="guide-risk ${tf.reversal_risk || 'medium'}">${tf.reversal_risk || 'medium'} reversal</div>
+          </div>
+          <div class="guide-card-line">Bias: <strong>${String(tf.bias || 'neutral').replaceAll('_', ' ')}</strong> · trigger ${Number.isFinite(triggerLevel) ? triggerLevel.toFixed(2) : (tf.trigger_level ?? '—')}</div>
+          <div class="guide-card-note">${tf.continuation_note || ''}</div>
+          <div class="guide-card-note" style="margin-top:4px">${tf.reversal_note || ''}</div>
+        </div>
+      `;
+    });
+    grid.innerHTML = tfCards.join('');
 
-  if (l2Guide) {
-    l2.innerHTML = `
-      <div class="guide-l2-title">L2 Reaction</div>
-      <div class="guide-l2-main">${prettyBias(l2Guide.display_bias || l2Guide.micro_bias)} · conf ${l2Guide.display_confidence || l2Guide.confidence || 0}%</div>
-      <div class="guide-l2-sub">${l2Guide.summary || ''}</div>
-      <div class="guide-l2-sub">Spread ${l2Guide.spread ?? '—'} · imbalance ${l2Guide.imbalance ?? '—'} · large buy ${l2Guide.large_buy ?? 0} / large sell ${l2Guide.large_sell ?? 0}</div>
-      <div class="guide-l2-sub">Flow state ${l2Guide.flow_state || 'balanced'} · raw ${prettyBias(l2Guide.raw_micro_bias || l2Guide.micro_bias)} ${l2Guide.raw_confidence ?? l2Guide.confidence ?? 0}%</div>
-    `;
-  } else {
-    l2.innerHTML = '<div class="guide-l2-sub">Waiting for live bid/ask reaction…</div>';
-  }
+    const focusItems = [];
+    if (normalized.continuation) {
+      focusItems.push(`
+        <div class="guide-focus ${normalized.continuation.side || 'neutral'}">
+          <div class="guide-focus-title">Continuation</div>
+          <div class="guide-focus-main">${normalized.continuation.message || ''}</div>
+          <div class="guide-focus-sub">Invalidation: ${Number(normalized.continuation.invalidation || 0).toFixed(2)}</div>
+        </div>
+      `);
+    }
+    if (normalized.prediction) {
+      focusItems.push(`
+        <div class="guide-focus predicted ${normalized.prediction.side || 'neutral'}">
+          <div class="guide-focus-title">Predicted Area</div>
+          <div class="guide-focus-main">${normalized.prediction.message || ''}</div>
+          <div class="guide-focus-sub">Watch ${Number(normalized.prediction.watch_low || 0).toFixed(2)} - ${Number(normalized.prediction.watch_high || 0).toFixed(2)} · trigger ${Number(normalized.prediction.trigger || 0).toFixed(2)}</div>
+        </div>
+      `);
+    }
+    if (normalized.best_long_zone) {
+      focusItems.push(`
+        <div class="guide-focus long">
+          <div class="guide-focus-title">${normalized.best_long_zone.label}</div>
+          <div class="guide-focus-main">${Number(normalized.best_long_zone.low).toFixed(2)} - ${Number(normalized.best_long_zone.high).toFixed(2)}</div>
+          <div class="guide-focus-sub">Invalidation ${Number(normalized.best_long_zone.invalidation).toFixed(2)} · ${normalized.best_long_zone.why || ''}</div>
+        </div>
+      `);
+    }
+    if (normalized.best_short_zone) {
+      focusItems.push(`
+        <div class="guide-focus short">
+          <div class="guide-focus-title">${normalized.best_short_zone.label}</div>
+          <div class="guide-focus-main">${Number(normalized.best_short_zone.low).toFixed(2)} - ${Number(normalized.best_short_zone.high).toFixed(2)}</div>
+          <div class="guide-focus-sub">Invalidation ${Number(normalized.best_short_zone.invalidation).toFixed(2)} · ${normalized.best_short_zone.why || ''}</div>
+        </div>
+      `);
+    }
+    focus.innerHTML = focusItems.length ? focusItems.join('') : '<div class="guide-empty">No focus zones yet.</div>';
 
-  if (!guide.zones || guide.zones.length === 0) {
-    zones.innerHTML = '<div class="guide-empty">No probable zones yet.</div>';
-    return;
-  }
-  zones.innerHTML = guide.zones.map(z => `
-    <div class="guide-zone-item ${z.direction || 'neutral'} ${z.stage || ''}">
-      <div class="guide-zone-top">
-        <div class="guide-zone-label">${z.label || 'Zone'}</div>
-        ${z.stage ? `<div class="guide-zone-stage ${z.stage}">${z.stage}</div>` : ''}
-        <div class="guide-zone-range">${Number(z.low).toFixed(2)} - ${Number(z.high).toFixed(2)}</div>
+    if (l2Guide) {
+      l2.innerHTML = `
+        <div class="guide-l2-title">L2 Reaction</div>
+        <div class="guide-l2-main">${prettyBias(l2Guide.display_bias || l2Guide.micro_bias)} · conf ${l2Guide.display_confidence || l2Guide.confidence || 0}%</div>
+        <div class="guide-l2-sub">${l2Guide.summary || ''}</div>
+        <div class="guide-l2-sub">Spread ${l2Guide.spread ?? '—'} · imbalance ${l2Guide.imbalance ?? '—'} · large buy ${l2Guide.large_buy ?? 0} / large sell ${l2Guide.large_sell ?? 0}</div>
+        <div class="guide-l2-sub">Flow state ${l2Guide.flow_state || 'balanced'} · raw ${prettyBias(l2Guide.raw_micro_bias || l2Guide.micro_bias)} ${l2Guide.raw_confidence ?? l2Guide.confidence ?? 0}%</div>
+      `;
+    } else {
+      l2.innerHTML = '<div class="guide-l2-sub">Waiting for live bid/ask reaction…</div>';
+    }
+
+    const guideZones = Array.isArray(normalized.zones) ? normalized.zones : [];
+    if (!guideZones.length) {
+      zones.innerHTML = '<div class="guide-empty">No probable zones yet.</div>';
+      renderGuideHud(normalized);
+      renderPredSVG();
+      return;
+    }
+    zones.innerHTML = guideZones.map(z => `
+      <div class="guide-zone-item ${z.direction || 'neutral'} ${z.stage || ''}">
+        <div class="guide-zone-top">
+          <div class="guide-zone-label">${z.label || 'Zone'}</div>
+          ${z.stage ? `<div class="guide-zone-stage ${z.stage}">${z.stage}</div>` : ''}
+          <div class="guide-zone-range">${Number(z.low).toFixed(2)} - ${Number(z.high).toFixed(2)}</div>
+        </div>
+        <div class="guide-zone-why">${z.why || ''}${z.trigger ? ` Trigger ${Number(z.trigger).toFixed(2)}.` : ''}</div>
       </div>
-      <div class="guide-zone-why">${z.why || ''}${z.trigger ? ` Trigger ${Number(z.trigger).toFixed(2)}.` : ''}</div>
-    </div>
-  `).join('');
-  latestGuide = guide;
-  renderGuideHud(guide);
-  renderPredSVG();
+    `).join('');
+    renderGuideHud(normalized);
+    renderPredSVG();
+  } catch (err) {
+    console.error('updateGuide failed:', err);
+    const overall = $('guideOverall');
+    const decisionBox = $('decisionBox');
+    const grid = $('guideGrid');
+    const focus = $('guideFocus');
+    const l2 = $('guideL2');
+    const zones = $('guideZones');
+    if (overall) overall.innerHTML = '<div class="guide-summary">Guide render error. Check console.</div>';
+    if (decisionBox) decisionBox.innerHTML = '<div class="decision-summary">Guide render error.</div>';
+    if (grid) grid.innerHTML = '<div class="guide-card"><div class="guide-card-note">Guide render error.</div></div>';
+    if (focus) focus.innerHTML = '<div class="guide-empty">Guide render error.</div>';
+    if (l2) l2.innerHTML = '<div class="guide-l2-sub">Guide render error.</div>';
+    if (zones) zones.innerHTML = '<div class="guide-empty">Guide render error.</div>';
+  }
 }
 
 function setInd(id, value, cls) {

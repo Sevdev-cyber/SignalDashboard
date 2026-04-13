@@ -802,6 +802,8 @@ class SignalDashboardServer:
         state["trader_guide"] = trader_guide
         state["decision_ledger"] = decision_ledger
         state["decision_stats"] = self._decision_stats()
+        if not trader_guide.get("tf_5m") or not trader_guide.get("tf_15m"):
+            log.warning("Trader guide missing tf context | keys=%s", sorted(list(trader_guide.keys()))[:20])
 
         self._latest_state = state
         self._latest_signals = signals_payload
@@ -885,6 +887,8 @@ class SignalDashboardServer:
         state["trader_guide"] = trader_guide
         state["decision_ledger"] = decision_ledger
         state["decision_stats"] = self._decision_stats()
+        if not trader_guide.get("tf_5m") or not trader_guide.get("tf_15m"):
+            log.warning("Trader guide missing tf context (tick) | keys=%s", sorted(list(trader_guide.keys()))[:20])
 
         # Local WS: full tick payload (signals, zones, etc.)
         local_payload = {

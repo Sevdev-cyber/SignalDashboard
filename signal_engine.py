@@ -902,6 +902,9 @@ class SignalEngine:
             "best_short_zone": best_short_zone,
             "tf_5m": guide_5m,
             "tf_15m": guide_15m,
+            "guide_5m": guide_5m,
+            "guide_15m": guide_15m,
+            "timeframes": [guide_5m, guide_15m],
             "zones": nearest_zones,
         }
 
