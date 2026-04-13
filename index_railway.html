@@ -2003,6 +2003,8 @@ function updateGuide(guide) {
   guide.display_confidence = overallStable.confidence || guide.confidence || 0;
 
   const decision = guide.market_decision || null;
+  const ledger = Array.isArray(guide.decision_ledger) ? guide.decision_ledger : [];
+  const stats = guide.decision_stats || {};
   if (decision) {
     const actionClass = String(decision.action || decision.bias || 'wait').toLowerCase();
     const confidence = decision.confidence != null ? decision.confidence : 0;
@@ -2021,6 +2023,15 @@ function updateGuide(guide) {
     const support = Array.isArray(decision.supporting_signals) && decision.supporting_signals.length
       ? decision.supporting_signals.slice(0, 4).join(' · ')
       : 'none';
+    const recentLedger = ledger.slice(-5).reverse().map((item) => {
+      const state = String(item.state || item.outcome || 'pending').toLowerCase();
+      const label = String(item.state || item.outcome || 'pending').toUpperCase();
+      const toneClass = state === 'good' ? 'good' : state === 'bad' ? 'bad' : state === 'weak' ? 'warn' : 'warn';
+      const score = Number.isFinite(Number(item.score)) ? Number(item.score) : 0;
+      const price = item.created_price != null ? Number(item.created_price).toFixed(2) : '—';
+      const summary = item.summary || item.scenario || 'decision';
+      return `<span class="decision-chip ${toneClass}" style="display:inline-flex;gap:4px;align-items:center">${label} ${score} • ${price} • ${summary.slice(0, 18)}${summary.length > 18 ? '…' : ''}</span>`;
+    }).join('');
     decisionBox.innerHTML = `
       <div class="decision-head">
         <div class="decision-action ${actionClass}">${decision.action || 'wait'}</div>
@@ -2037,8 +2048,43 @@ function updateGuide(guide) {
         <span class="decision-chip" style="border-color:${assTone.border};background:${assTone.bg};color:${assTone.fg}">outcome ${assessmentLabel}</span>
       </div>
       <div class="decision-summary" style="margin-top:6px;font-size:.72rem;opacity:.92">result: ${assessmentReason}</div>
+      <div style="margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,.06)">
+        <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:6px">
+          <span style="font-size:.62rem;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted)">Decision ledger</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:.68rem;color:var(--text-muted)">win ${stats.win_rate || 0}% · good ${stats.good || 0} / ${stats.resolved || 0}</span>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px">
+          ${recentLedger || '<span class="decision-chip">No resolved decisions yet</span>'}
+        </div>
+      </div>
     `;
     decisionConf.textContent = `conf ${confidence}%`;
+  } else {
+    const recentLedger = ledger.slice(-5).reverse().map((item) => {
+      const state = String(item.state || item.outcome || 'pending').toLowerCase();
+      const label = String(item.state || item.outcome || 'pending').toUpperCase();
+      const toneClass = state === 'good' ? 'good' : state === 'bad' ? 'bad' : state === 'weak' ? 'warn' : 'warn';
+      const score = Number.isFinite(Number(item.score)) ? Number(item.score) : 0;
+      const price = item.created_price != null ? Number(item.created_price).toFixed(2) : '—';
+      const summary = item.summary || item.scenario || 'decision';
+      return `<span class="decision-chip ${toneClass}" style="display:inline-flex;gap:4px;align-items:center">${label} ${score} • ${price} • ${summary.slice(0, 18)}${summary.length > 18 ? '…' : ''}</span>`;
+    }).join('');
+    decisionBox.innerHTML = `
+      <div class="decision-head">
+        <div class="decision-action wait">WAIT</div>
+        <div class="guide-conf" id="decisionConf">conf 0%</div>
+      </div>
+      <div class="decision-summary">Bot decision waiting for snapshot…</div>
+      <div style="margin-top:10px;padding-top:8px;border-top:1px solid rgba(255,255,255,.06)">
+        <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:6px">
+          <span style="font-size:.62rem;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted)">Decision ledger</span>
+          <span style="font-family:'JetBrains Mono',monospace;font-size:.68rem;color:var(--text-muted)">win ${stats.win_rate || 0}% · good ${stats.good || 0} / ${stats.resolved || 0}</span>
+        </div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px">
+          ${recentLedger || '<span class="decision-chip">No resolved decisions yet</span>'}
+        </div>
+      </div>
+    `;
   }
 
   const l2Guide = guide.l2 ? { ...guide.l2 } : null;

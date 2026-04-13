@@ -95,6 +95,10 @@ class SignalDashboardServer:
         self._latest_engine_debug: dict = {}
         self._latest_zones: dict = {}
         self._latest_market_decision: dict = {}
+        self._decision_ledger: list[dict] = []
+        self._decision_resolved: list[dict] = []
+        self._decision_signature_active: str | None = None
+        self._decision_seq = 0
         self._recent_ticks = deque(maxlen=1200)
         self._l2_display_state = {
             "bias": "neutral",
@@ -149,8 +153,206 @@ class SignalDashboardServer:
                 "entry_zone": None,
                 "target_zone": None,
                 "supporting_signals": [],
+                "assessment": {},
                 "prompt": "",
             }
+
+    def _decision_signature(self, decision: dict) -> str:
+        entry = decision.get("entry_zone") or {}
+        target = decision.get("target_zone") or {}
+        return "|".join([
+            str(decision.get("action") or "wait"),
+            str(decision.get("bias") or "neutral"),
+            f"{float(decision.get('confidence') or 0):.0f}",
+            f"{float(decision.get('trigger_level') or 0):.2f}",
+            f"{float(decision.get('invalidation_level') or 0):.2f}",
+            f"{float(entry.get('low') or 0):.2f}",
+            f"{float(entry.get('high') or 0):.2f}",
+            f"{float(target.get('low') or 0):.2f}",
+            f"{float(target.get('high') or 0):.2f}",
+            str(decision.get("scenario") or ""),
+        ])
+
+    @staticmethod
+    def _zone_mid(zone: dict | None) -> float | None:
+        if not isinstance(zone, dict):
+            return None
+        low = zone.get("low")
+        high = zone.get("high")
+        try:
+            low_v = float(low)
+            high_v = float(high)
+        except Exception:
+            return None
+        if not (low_v or high_v):
+            return None
+        return round((low_v + high_v) / 2.0, 2)
+
+    def _decision_max_age_bars(self) -> int:
+        return max(6, int(round(18 / max(self.bar_tf_min, 1))))
+
+    def _resolution_from_decision(self, item: dict, price: float, bar_count: int) -> tuple[str, int, str, float]:
+        direction = str(item.get("direction") or item.get("bias") or "neutral").lower()
+        entry = float(item.get("entry_mid") or item.get("trigger_level") or price)
+        target = float(item.get("target_mid") or entry)
+        invalid = float(item.get("invalidation_level") or item.get("invalid_level") or entry)
+        price_min = float(item.get("price_min") or price)
+        price_max = float(item.get("price_max") or price)
+        created_bar = int(item.get("created_bar") or bar_count)
+        age_bars = max(0, bar_count - created_bar)
+        max_age = int(item.get("max_age_bars") or self._decision_max_age_bars())
+        atr = float(item.get("atr") or 1.0)
+        atr = atr if atr > 0 else 1.0
+        progress = 0.0
+
+        if direction == "long":
+            if price_min <= invalid:
+                return "bad", 8, "Invalidation hit before target.", -1.0
+            if price_max >= target:
+                span = max(atr * 0.35, target - entry, 1.0)
+                progress = max(progress, min(1.2, (price_max - entry) / span))
+                score = int(max(75, min(100, 72 + progress * 18)))
+                return "good", score, "Target hit before invalidation.", progress
+            if age_bars >= max_age:
+                span = max(atr * 0.35, target - entry, 1.0)
+                progress = (price_max - entry) / span
+                if price_max >= entry:
+                    score = int(max(40, min(72, 50 + progress * 20 - (entry - price_min) / atr * 8)))
+                    return "weak", score, "Timed out after partial follow-through.", progress
+                score = int(max(18, min(48, 42 - (entry - price_min) / atr * 10)))
+                return "bad", score, "Timed out without meaningful follow-through.", progress
+            if price_max >= entry:
+                span = max(atr * 0.35, target - entry, 1.0)
+                progress = (price_max - entry) / span
+                score = int(max(45, min(84, 55 + progress * 15)))
+                return "working", score, "Price is holding above entry.", progress
+            return "pending", 35, "Waiting for long confirmation.", 0.0
+
+        if direction == "short":
+            if price_max >= invalid:
+                return "bad", 8, "Invalidation hit before target.", -1.0
+            if price_min <= target:
+                span = max(atr * 0.35, entry - target, 1.0)
+                progress = max(progress, min(1.2, (entry - price_min) / span))
+                score = int(max(75, min(100, 72 + progress * 18)))
+                return "good", score, "Target hit before invalidation.", progress
+            if age_bars >= max_age:
+                span = max(atr * 0.35, entry - target, 1.0)
+                progress = (entry - price_min) / span
+                if price_min <= entry:
+                    score = int(max(40, min(72, 50 + progress * 20 - (price_max - entry) / atr * 8)))
+                    return "weak", score, "Timed out after partial follow-through.", progress
+                score = int(max(18, min(48, 42 - (price_max - entry) / atr * 10)))
+                return "bad", score, "Timed out without meaningful follow-through.", progress
+            if price_min <= entry:
+                span = max(atr * 0.35, entry - target, 1.0)
+                progress = (entry - price_min) / span
+                score = int(max(45, min(84, 55 + progress * 15)))
+                return "working", score, "Price is holding below entry.", progress
+            return "pending", 35, "Waiting for short confirmation.", 0.0
+
+        return "pending", 30, "No directional decision to score.", 0.0
+
+    def _update_decision_ledger(self, decision: dict, price: float, bar_count: int, state: dict) -> list[dict]:
+        if not decision:
+            return self._decision_ledger[-8:]
+
+        sig = self._decision_signature(decision)
+        action = str(decision.get("action") or "wait").lower()
+        bias = str(decision.get("bias") or "neutral").lower()
+        confidence = int(float(decision.get("confidence") or 0))
+        entry_mid = self._zone_mid(decision.get("entry_zone"))
+        target_mid = self._zone_mid(decision.get("target_zone"))
+        trigger_level = decision.get("trigger_level")
+        invalidation_level = decision.get("invalidation_level")
+        atr = float(state.get("atr") or (self.bars_df.iloc[-1].get("atr", 1.0) if not self.bars_df.empty else 1.0))
+
+        last_item = self._decision_ledger[-1] if self._decision_ledger else None
+        last_sig = last_item.get("signature") if isinstance(last_item, dict) else None
+        last_state = str(last_item.get("state") or last_item.get("outcome") or "") if isinstance(last_item, dict) else ""
+        if action not in {"wait", "unavailable"} and (not last_item or last_sig != sig or last_state in {"good", "bad", "weak"}):
+            self._decision_seq += 1
+            item = {
+                "id": self._decision_seq,
+                "signature": sig,
+                "created_at": int(time.time()),
+                "created_bar": int(bar_count),
+                "created_price": float(price),
+                "direction": bias if bias in {"long", "short"} else action,
+                "bias": bias,
+                "action": action,
+                "confidence": confidence,
+                "scenario": decision.get("scenario"),
+                "summary": decision.get("summary"),
+                "reasons": decision.get("reasons") or [],
+                "warnings": decision.get("warnings") or [],
+                "trigger_level": float(trigger_level) if trigger_level is not None else None,
+                "invalidation_level": float(invalidation_level) if invalidation_level is not None else None,
+                "entry_mid": entry_mid,
+                "target_mid": target_mid,
+                "entry_zone": decision.get("entry_zone"),
+                "target_zone": decision.get("target_zone"),
+                "supporting_signals": decision.get("supporting_signals") or [],
+                "price_min": float(price),
+                "price_max": float(price),
+                "atr": float(atr or 1.0),
+                "max_age_bars": self._decision_max_age_bars(),
+                "state": "pending",
+                "outcome": "pending",
+                "score": 0,
+                "progress": 0.0,
+                "resolved_at": None,
+                "resolved_bar": None,
+                "resolved_price": None,
+                "resolution_reason": "",
+            }
+            self._decision_ledger.append(item)
+            self._decision_signature_active = sig
+
+        if not self._decision_ledger:
+            return []
+
+        resolved_now = []
+        for item in self._decision_ledger:
+            if item.get("state") in {"good", "bad", "weak"}:
+                continue
+            item["price_min"] = min(float(item.get("price_min") or price), float(price))
+            item["price_max"] = max(float(item.get("price_max") or price), float(price))
+            state_name, score, reason, progress = self._resolution_from_decision(item, price, bar_count)
+            item["state"] = state_name
+            item["outcome"] = state_name
+            item["score"] = score
+            item["progress"] = progress
+            item["resolution_reason"] = reason
+            if state_name in {"good", "bad", "weak"} and item.get("resolved_at") is None:
+                item["resolved_at"] = int(time.time())
+                item["resolved_bar"] = int(bar_count)
+                item["resolved_price"] = float(price)
+                resolved_now.append(dict(item))
+                self._decision_resolved.append(dict(item))
+
+        self._decision_ledger = self._decision_ledger[-40:]
+        self._decision_resolved = self._decision_resolved[-40:]
+        return [dict(x) for x in self._decision_ledger[-8:]]
+
+    def _decision_stats(self) -> dict:
+        total = len(self._decision_ledger)
+        resolved = [x for x in self._decision_ledger if x.get("state") in {"good", "bad", "weak"}]
+        pending = total - len(resolved)
+        good = sum(1 for x in resolved if x.get("state") == "good")
+        bad = sum(1 for x in resolved if x.get("state") == "bad")
+        weak = sum(1 for x in resolved if x.get("state") == "weak")
+        avg_score = round(sum(float(x.get("score") or 0) for x in resolved) / len(resolved), 1) if resolved else 0.0
+        return {
+            "total": total,
+            "resolved": len(resolved),
+            "pending": pending,
+            "good": good,
+            "bad": bad,
+            "weak": weak,
+            "avg_score": avg_score,
+            "win_rate": round((good / len(resolved)) * 100, 1) if resolved else 0.0,
+        }
 
     @staticmethod
     def _json_fallback(obj):
@@ -592,10 +794,14 @@ class SignalDashboardServer:
         
         zones = self.engine.compute_weighted_zones(signals_payload)
         market_decision = self._build_market_decision(state, signals_payload, zones, ghost_signals)
+        decision_ledger = self._update_decision_ledger(market_decision, price, self.bar_count, state)
         state["market_decision"] = market_decision
         trader_guide = dict(state.get("trader_guide") or {})
         trader_guide["market_decision"] = market_decision
+        trader_guide["decision_ledger"] = decision_ledger
         state["trader_guide"] = trader_guide
+        state["decision_ledger"] = decision_ledger
+        state["decision_stats"] = self._decision_stats()
 
         self._latest_state = state
         self._latest_signals = signals_payload
@@ -633,6 +839,8 @@ class SignalDashboardServer:
             "signals": signals_payload,
             "ghost_signals": ghost_signals,
             "market_decision": market_decision,
+            "decision_ledger": decision_ledger,
+            "decision_stats": state["decision_stats"],
             "resolved": self.resolved_signals,
             "zones": zones,
             "history": self.engine.get_history(),
@@ -669,10 +877,14 @@ class SignalDashboardServer:
         signals_payload.sort(key=lambda x: x["confidence_pct"], reverse=True)
         self._latest_signals = signals_payload
         market_decision = self._build_market_decision(state, signals_payload, self._latest_zones, self._latest_ghost_signals)
+        decision_ledger = self._update_decision_ledger(market_decision, price, self.bar_count, state)
         state["market_decision"] = market_decision
         trader_guide = dict(state.get("trader_guide") or {})
         trader_guide["market_decision"] = market_decision
+        trader_guide["decision_ledger"] = decision_ledger
         state["trader_guide"] = trader_guide
+        state["decision_ledger"] = decision_ledger
+        state["decision_stats"] = self._decision_stats()
 
         # Local WS: full tick payload (signals, zones, etc.)
         local_payload = {
@@ -681,6 +893,8 @@ class SignalDashboardServer:
             "signals": signals_payload[:15],
             "ghost_signals": self._latest_ghost_signals[:8],
             "market_decision": market_decision,
+            "decision_ledger": decision_ledger,
+            "decision_stats": state["decision_stats"],
             "resolved": self.resolved_signals[-10:],
             "zones": self._latest_zones,
         }
@@ -698,6 +912,8 @@ class SignalDashboardServer:
                     "signals": signals_payload[:10],
                     "ghost_signals": self._latest_ghost_signals[:4],
                     "market_decision": market_decision,
+                    "decision_ledger": decision_ledger,
+                    "decision_stats": state["decision_stats"],
                 }
                 asyncio.run_coroutine_threadsafe(self._relay_push(relay_tick), self.loop)
 
