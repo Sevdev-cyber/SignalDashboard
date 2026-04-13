@@ -14,6 +14,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import sys
 import threading
 import time
@@ -48,13 +49,24 @@ except ImportError:
 class SignalDashboardServer:
     """Main server: reads TCP feed, computes signals, broadcasts via WS."""
 
-    def __init__(self, *, tcp_host: str, tcp_port: int, ws_port: int, demo: bool = False, relay_url: str = None, relay_secret: str = None):
+    def __init__(
+        self,
+        *,
+        tcp_host: str,
+        tcp_port: int,
+        ws_port: int,
+        demo: bool = False,
+        relay_url: str = None,
+        relay_secret: str = None,
+        account_name: str | None = None,
+    ):
         self.tcp_host = tcp_host
         self.tcp_port = tcp_port
         self.ws_port = ws_port
         self.demo = demo
         self.relay_url = relay_url
         self.relay_secret = relay_secret
+        self.account_name = (account_name or "").strip() or None
         self.executor = ThreadPoolExecutor(max_workers=2)
         self.bar_tf_min = get_target_tf_min()
 
@@ -371,6 +383,10 @@ class SignalDashboardServer:
                         log.error("TCP connect failed, retry in 10s...")
                         time.sleep(10)
                         continue
+                    if self.account_name:
+                        log.info("Account preference requested: %s", self.account_name)
+                        adapter.set_account(self.account_name)
+                    adapter.get_account()
                     adapter.ping()
                     adapter.read_loop()  # blocking
                 except Exception as e:
@@ -970,6 +986,7 @@ class SignalDashboardServer:
         log.info("  Mode: %s", "DEMO" if self.demo else "LIVE")
         log.info("  Bars TF: %dmin | Engine: %s",
                  self.bar_tf_min, getattr(self.engine, "engine_mode", "unknown"))
+        log.info("  NT Account: %s", self.account_name or "chart default")
         log.info("=" * 60)
 
         # Store main loop for thread-safe broadcasting
@@ -1001,6 +1018,7 @@ def main():
     parser.add_argument("--demo", action="store_true", help="Demo mode (no NT8)")
     parser.add_argument("--relay-url", default=None, help="URL to push updates to (e.g. https://my-relay.railway.app/push)")
     parser.add_argument("--relay-secret", default=None, help="Secret token for push")
+    parser.add_argument("--account", default=None, help="Preferred NT account, e.g. Playback101 or Sim101")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
 
@@ -1019,7 +1037,9 @@ def main():
     server = SignalDashboardServer(
         tcp_host=args.host, tcp_port=args.port,
         ws_port=args.ws_port, demo=args.demo,
-        relay_url=args.relay_url, relay_secret=args.relay_secret
+        relay_url=args.relay_url,
+        relay_secret=args.relay_secret,
+        account_name=args.account or os.getenv("NT_ACCOUNT_NAME"),
     )
     asyncio.run(server.run())
 

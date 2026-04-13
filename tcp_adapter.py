@@ -106,7 +106,8 @@ class TickStreamerAdapter:
     # ── Send commands ──
 
     def _send(self, cmd: str) -> bool:
-        if self.dry_run and not cmd.startswith("PING"):
+        allowed_in_dry_run = ("PING", "SET_ACCOUNT", "GET_ACCOUNT")
+        if self.dry_run and not cmd.startswith(allowed_in_dry_run):
             log.info("[DRY] %s", cmd)
             return True
         if not self.connected or not self._sock:
@@ -148,6 +149,16 @@ class TickStreamerAdapter:
 
     def close_position(self) -> bool:
         return self._send("CLOSE")
+
+    def set_account(self, account_name: str) -> bool:
+        account_name = (account_name or "").strip()
+        if not account_name:
+            log.error("Cannot send SET_ACCOUNT — empty account name")
+            return False
+        return self._send(f"SET_ACCOUNT;{account_name}")
+
+    def get_account(self) -> bool:
+        return self._send("GET_ACCOUNT")
 
     def ping(self) -> bool:
         return self._send("PING")
@@ -311,7 +322,10 @@ class TickStreamerAdapter:
 
                     # ACK — just log
                     if msg == "ACK":
-                        log.debug("ACK: %s", line)
+                        if len(parts) >= 4 and parts[1] in {"SET_ACCOUNT", "GET_ACCOUNT", "PING"}:
+                            log.info("ACK: %s", line)
+                        else:
+                            log.debug("ACK: %s", line)
                         continue
 
                 except (ValueError, IndexError) as e:

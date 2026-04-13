@@ -141,6 +141,32 @@ C:\Users\Administrator\Desktop\
 └── 2_START_Scalper_Live.bat           ← NT8 live
 ```
 
+### Wybór konta NT8
+
+Wizjoner może pracować na:
+
+- `Playback101`
+- `Sim101`
+- dowolnym innym koncie widocznym w NinjaTrader
+
+Najprościej ustaw to w `C:\Users\Administrator\Desktop\Wizjoner.bat`:
+
+```bat
+@echo off
+cd /d C:\SignalDashboard
+set DASHBOARD_BAR_TF_MIN=1
+set SIGNAL_ENGINE_MODE=final_mtf_v3
+set NT_ACCOUNT_NAME=Playback101
+python signal_server.py --host 127.0.0.1 --port 5557 --ws-port 8082 --account %NT_ACCOUNT_NAME%
+```
+
+Uwagi:
+
+- jeśli `--account` nie jest podany, backend zostawia konto ustawione w samym `TickStreamerMirror`
+- po starcie backend wysyła do NT8 `SET_ACCOUNT;<nazwa>` i loguje aktywne konto
+- w `TickStreamerMirror` nadal musi być włączone `Accept Commands = true`
+- jeżeli po zmianie nic się nie przełącza, trzeba zaktualizować i przeładować wersję `TickStreamerMirror.cs` na VPS
+
 ### Railway (cloud)
 ```
 GitHub repo: Sevdev-cyber/SignalDashboard
@@ -174,6 +200,7 @@ echo "DEPLOYED"
 scp SignalDashboard/signal_server.py Administrator@66.42.117.137:"C:/SignalDashboard/"
 scp SignalDashboard/signal_engine.py Administrator@66.42.117.137:"C:/SignalDashboard/"
 scp SignalDashboard/bar_builder.py Administrator@66.42.117.137:"C:/SignalDashboard/"
+scp SignalDashboard/tcp_adapter.py Administrator@66.42.117.137:"C:/SignalDashboard/"
 scp NewSignal/final_signal_engine.py Administrator@66.42.117.137:"C:/NewSignal/"
 scp NewSignal/newsignal_core.py Administrator@66.42.117.137:"C:/NewSignal/"
 ```
