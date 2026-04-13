@@ -20,6 +20,7 @@ import time
 import urllib.request
 import urllib.error
 from concurrent.futures import ThreadPoolExecutor
+from collections import defaultdict, deque
 from datetime import datetime
 from pathlib import Path
 
@@ -29,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 import compat  # noqa: F401 — patches dataclass for Python 3.9 (before hsb)
 from signal_engine import SignalEngine
+from bar_builder import get_target_tf_min
 
 LOG_FMT = "%(asctime)s [%(name)-14s] %(levelname)-5s  %(message)s"
 log = logging.getLogger("signal_dash")
@@ -54,6 +56,7 @@ class SignalDashboardServer:
         self.relay_url = relay_url
         self.relay_secret = relay_secret
         self.executor = ThreadPoolExecutor(max_workers=2)
+        self.bar_tf_min = get_target_tf_min()
 
         self.engine = SignalEngine()
         self.bars_df = pd.DataFrame()
@@ -76,6 +79,7 @@ class SignalDashboardServer:
         self._latest_state: dict = {}
         self._latest_signals: list[dict] = []
         self._latest_zones: dict = {}
+        self._recent_ticks = deque(maxlen=1200)
         self.loop = None
 
     # ── WebSocket Server ──
@@ -198,7 +202,7 @@ class SignalDashboardServer:
         from tcp_adapter import TickStreamerAdapter
         from bar_builder import warmup_bars_to_df, append_bar, apply_tick_deltas, BarAccumulator, enrich_bars
 
-        bar_accum = BarAccumulator(target_min=5)
+        bar_accum = BarAccumulator(target_min=self.bar_tf_min)
 
         adapter = TickStreamerAdapter(host=self.tcp_host, port=self.tcp_port, dry_run=True)
 
@@ -240,7 +244,7 @@ class SignalDashboardServer:
             if total_vol > 0:
                 self._bar_delta_pct = (true_delta) / total_vol * 100
 
-            # Accumulate sub-5min bars into 5-min candles
+            # Accumulate sub-target bars into target candles
             completed = bar_accum.add_bar(bar, true_delta=true_delta,
                                           buy_vol=float(buy_v), sell_vol=float(sell_v))
 
@@ -257,7 +261,7 @@ class SignalDashboardServer:
                 log.debug("Accumulating bar: C=%.2f Δ=%+d", bar.close, true_delta)
                 return
 
-            # ── 5-min bar completed ──
+            # ── target timeframe bar completed ──
             self._session_cvd += int(completed["delta"])
 
             new_row = completed  # already a dict with all fields
@@ -267,8 +271,8 @@ class SignalDashboardServer:
             last = self.bars_df.iloc[-1]
 
             self.current_price = float(last["close"])
-            log.info("5MIN BAR %d | C=%.2f | ATR=%.1f | Δ=%+d (buy=%.0f sell=%.0f) | CVD=%+d",
-                     self.bar_count, self.current_price,
+            log.info("%dMIN BAR %d | C=%.2f | ATR=%.1f | Δ=%+d (buy=%.0f sell=%.0f) | CVD=%+d",
+                     self.bar_tf_min, self.bar_count, self.current_price,
                      float(last.get("atr", 0)), int(completed["delta"]),
                      completed.get("buy_volume", 0), completed.get("sell_volume", 0),
                      self._session_cvd)
@@ -286,6 +290,16 @@ class SignalDashboardServer:
 
         def on_tick(tick):
             self.current_price = tick.price
+            self._recent_ticks.append(
+                {
+                    "ts": time.time(),
+                    "price": float(tick.price),
+                    "size": int(tick.size),
+                    "aggressor": int(tick.aggressor),
+                    "bid": float(tick.bid),
+                    "ask": float(tick.ask),
+                }
+            )
             if tick.aggressor == 1:
                 self._bar_buy_vol += tick.size
             elif tick.aggressor == 2:
@@ -395,7 +409,7 @@ class SignalDashboardServer:
 
             # Per-signal hold time (scalps expire fast, swings stay longer)
             max_hold = s.get("max_hold_bars", 48)  # from SIGNAL_TIME_PROFILE
-            max_hold_sec = max_hold * 300  # 5-min bars → seconds
+            max_hold_sec = max_hold * self.bar_tf_min * 60
             age_s = last_bar_time - s.get("origin_time", last_bar_time)
             if age_s > max_hold_sec:
                 return "expired"
@@ -464,6 +478,7 @@ class SignalDashboardServer:
             current_price=self.current_price,
             bar_delta_pct=self._bar_delta_pct,
         )
+        self._inject_l2_guide(state)
 
         # Convert dictionary to descending sorted list for broadcast
         signals_payload = list(self.active_signals.values())
@@ -488,10 +503,10 @@ class SignalDashboardServer:
                     ts = int(dt.timestamp())
                 except AttributeError:
                     ts = int(pd.to_datetime(dt).timestamp())
-                # NT8 bar timestamps are CLOSE time (10:05 = bar 10:00-10:05)
-                # Lightweight Charts expects OPEN time → subtract 5 minutes
+                # NT8 bar timestamps are CLOSE time.
+                # Lightweight Charts expects OPEN time → shift back by active TF.
                 bars_for_chart.append({
-                    "time": ts - 300,  # shift back 5 min (close→open time)
+                    "time": ts - self.bar_tf_min * 60,
                     "open": float(row["open"]),
                     "high": float(row["high"]),
                     "low": float(row["low"]),
@@ -527,6 +542,7 @@ class SignalDashboardServer:
             current_price=self.current_price,
             bar_delta_pct=self._bar_delta_pct,
         )
+        self._inject_l2_guide(state)
         self._latest_state = state
 
         signals_payload = list(self.active_signals.values())
@@ -579,6 +595,186 @@ class SignalDashboardServer:
                 dead.add(ws)
         self._ws_clients -= dead
 
+    def _inject_l2_guide(self, state: dict) -> None:
+        if not state:
+            return
+        guide = self._build_l2_guide(current_price=float(state.get("price", self.current_price or 0.0)))
+        state["l2_guide"] = guide
+        trader_guide = dict(state.get("trader_guide") or {})
+        trader_guide["l2"] = guide
+        if guide.get("zones"):
+            merged_zones = list(trader_guide.get("zones") or [])
+            merged_zones.extend(guide["zones"])
+            trader_guide["zones"] = merged_zones[:6]
+        if guide.get("summary"):
+            trader_guide["summary"] = f"{trader_guide.get('summary', '')} L2: {guide['summary']}".strip()
+        state["trader_guide"] = trader_guide
+
+    def _build_l2_guide(self, *, current_price: float) -> dict:
+        ticks = list(self._recent_ticks)
+        if len(ticks) < 25 or current_price <= 0:
+            return {
+                "micro_bias": "neutral",
+                "confidence": 0,
+                "summary": "Waiting for enough live bid/ask ticks.",
+                "spread": None,
+                "support_zone": None,
+                "resistance_zone": None,
+                "zones": [],
+            }
+
+        recent = ticks[-400:]
+        spreads = [max(0.0, t["ask"] - t["bid"]) for t in recent if t["bid"] > 0 and t["ask"] > 0]
+        avg_spread = round(sum(spreads) / len(spreads), 3) if spreads else None
+
+        buy_vol = sum(t["size"] for t in recent if t["aggressor"] == 1)
+        sell_vol = sum(t["size"] for t in recent if t["aggressor"] == 2)
+        total_aggr = buy_vol + sell_vol
+        imbalance = ((buy_vol - sell_vol) / total_aggr) if total_aggr else 0.0
+
+        bid_presence = defaultdict(float)
+        ask_presence = defaultdict(float)
+        bid_hits = defaultdict(float)
+        ask_hits = defaultdict(float)
+        large_buy = 0
+        large_sell = 0
+
+        for t in recent:
+            bid = self._round_tick(t["bid"])
+            ask = self._round_tick(t["ask"])
+            size = float(t["size"])
+            if bid > 0:
+                bid_presence[bid] += 1.0
+                if t["aggressor"] == 2 and abs(t["price"] - bid) <= 0.5:
+                    bid_hits[bid] += size
+                    if size >= 10:
+                        large_sell += 1
+            if ask > 0:
+                ask_presence[ask] += 1.0
+                if t["aggressor"] == 1 and abs(t["price"] - ask) <= 0.5:
+                    ask_hits[ask] += size
+                    if size >= 10:
+                        large_buy += 1
+
+        support_zone = self._pick_l2_zone(
+            side="support",
+            current_price=current_price,
+            presence=bid_presence,
+            hits=bid_hits,
+        )
+        resistance_zone = self._pick_l2_zone(
+            side="resistance",
+            current_price=current_price,
+            presence=ask_presence,
+            hits=ask_hits,
+        )
+
+        if imbalance >= 0.18:
+            micro_bias = "long"
+        elif imbalance <= -0.18:
+            micro_bias = "short"
+        else:
+            micro_bias = "neutral"
+        confidence = min(90, int(round(45 + abs(imbalance) * 120 + max(large_buy, large_sell) * 1.5)))
+
+        parts = []
+        if support_zone:
+            parts.append(
+                f"defended bid near {support_zone['low']:.2f}-{support_zone['high']:.2f}"
+            )
+        if resistance_zone:
+            parts.append(
+                f"defended ask near {resistance_zone['low']:.2f}-{resistance_zone['high']:.2f}"
+            )
+        if micro_bias == "long":
+            lead = "Micro bias leans LONG."
+        elif micro_bias == "short":
+            lead = "Micro bias leans SHORT."
+        else:
+            lead = "Micro bias is balanced."
+        summary = lead
+        if parts:
+            summary += " Watch " + " and ".join(parts) + "."
+
+        zones = []
+        if support_zone:
+            zones.append(
+                {
+                    "label": "L2 support reaction",
+                    "direction": "long",
+                    "low": support_zone["low"],
+                    "high": support_zone["high"],
+                    "why": support_zone["note"],
+                }
+            )
+        if resistance_zone:
+            zones.append(
+                {
+                    "label": "L2 resistance reaction",
+                    "direction": "short",
+                    "low": resistance_zone["low"],
+                    "high": resistance_zone["high"],
+                    "why": resistance_zone["note"],
+                }
+            )
+
+        return {
+            "micro_bias": micro_bias,
+            "confidence": confidence,
+            "summary": summary,
+            "spread": avg_spread,
+            "imbalance": round(imbalance, 3),
+            "support_zone": support_zone,
+            "resistance_zone": resistance_zone,
+            "large_buy": large_buy,
+            "large_sell": large_sell,
+            "zones": zones,
+        }
+
+    def _pick_l2_zone(self, *, side: str, current_price: float, presence: dict, hits: dict) -> dict | None:
+        candidates = []
+        for level, seen in presence.items():
+            if side == "support" and level > current_price + 1.0:
+                continue
+            if side == "resistance" and level < current_price - 1.0:
+                continue
+            if abs(level - current_price) > 18.0:
+                continue
+            score = seen + hits.get(level, 0.0) * 0.08
+            if score < 8:
+                continue
+            candidates.append((score, level, seen, hits.get(level, 0.0)))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: (item[0], -abs(item[1] - current_price)), reverse=True)
+        _, level, seen, hit_vol = candidates[0]
+        low = round(level - 0.5, 2)
+        high = round(level + 0.5, 2)
+        if side == "support":
+            note = (
+                f"Repeated bid holding near {level:.2f}; sellers hit bid {int(hit_vol)} contracts here. "
+                f"Long reaction is more likely if this zone holds."
+            )
+        else:
+            note = (
+                f"Repeated ask holding near {level:.2f}; buyers lifted offer {int(hit_vol)} contracts here. "
+                f"Short reaction is more likely if this zone rejects."
+            )
+        return {
+            "level": round(level, 2),
+            "low": low,
+            "high": high,
+            "touches": int(seen),
+            "hit_volume": int(hit_vol),
+            "note": note,
+        }
+
+    @staticmethod
+    def _round_tick(price: float) -> float:
+        if price <= 0:
+            return 0.0
+        return round(round(price / 0.25) * 0.25, 2)
+
     # ── Demo Mode ──
 
     def _demo_loop(self):
@@ -597,8 +793,8 @@ class SignalDashboardServer:
         price = CENTER_PRICE
         bars = []
 
-        # Prefill 800 historical bars (5-min bars going back ~2.7 days)
-        BAR_SECS = 300  # 5 minutes per bar
+        # Prefill historical bars at the configured dashboard TF.
+        BAR_SECS = self.bar_tf_min * 60
         now_ts = int(pd.Timestamp.now(tz="UTC").timestamp())
         for i in range(800, 0, -1):
             atr = random.uniform(15, 35)
@@ -672,7 +868,7 @@ class SignalDashboardServer:
             self.bar_count += 1
 
             self._evaluate_and_broadcast()
-            time.sleep(5)
+            time.sleep(max(1, self.bar_tf_min))
 
     # ── Main Run ──
 
@@ -683,6 +879,8 @@ class SignalDashboardServer:
         log.info("  TCP: %s:%d | WS: localhost:%d",
                  self.tcp_host, self.tcp_port, self.ws_port)
         log.info("  Mode: %s", "DEMO" if self.demo else "LIVE")
+        log.info("  Bars TF: %dmin | Engine: %s",
+                 self.bar_tf_min, getattr(self.engine, "engine_mode", "unknown"))
         log.info("=" * 60)
 
         # Store main loop for thread-safe broadcasting

@@ -12,6 +12,8 @@ Returns ALL signal candidates (not just champion) with enriched metadata:
 
 from __future__ import annotations
 
+import os
+import sys
 import compat  # noqa: F401 — patches dataclass for Python 3.9
 
 import logging
@@ -19,16 +21,23 @@ import math
 import time
 from collections import defaultdict
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 log = logging.getLogger("signal_dash")
 
 import pandas as pd
 
+THIS_DIR = Path(__file__).resolve().parent
+NEW_SIGNAL_DIR = THIS_DIR.parent / "NewSignal"
+if str(NEW_SIGNAL_DIR) not in sys.path:
+    sys.path.insert(0, str(NEW_SIGNAL_DIR))
+
 from hsb.signals.composite import CompositeGenerator, CONFLUENCE_BOOST
 from hsb.pipeline.context_builder import ContextBuilder
 from hsb.pipeline.regime import infer_regime
 from hsb.domain.enums import Direction
+from final_signal_engine import FinalSignalEngine
 
 
 # Historical signal quality scores (from 37,803 signal events, composite metric)
@@ -157,6 +166,14 @@ class SignalEngine:
         self.ctx_builder = ContextBuilder()
         self._last_signals: list[dict] = []
         self._signal_history: list[dict] = []  # last 50 signals for tracking
+        self.engine_mode = os.getenv("SIGNAL_ENGINE_MODE", "final_mtf_v3").strip().lower()
+        if self.engine_mode == "final_mtf_v2":
+            final_variant = "v2"
+        elif self.engine_mode == "final_mtf_v3":
+            final_variant = "v3"
+        else:
+            final_variant = "v1"
+        self.final_engine = FinalSignalEngine(variant=final_variant)
 
     def evaluate(
         self,
@@ -175,6 +192,14 @@ class SignalEngine:
         - regime, regime_match, time_edge, day_edge
         - reasons, source_type
         """
+        if self.engine_mode in {"final_mtf", "final_mtf_v2", "final_mtf_v3"}:
+            return self._evaluate_final_mtf(
+                bars_df,
+                bar_delta_pct=bar_delta_pct,
+                current_price=current_price,
+                now=now,
+            )
+
         if bars_df.empty or len(bars_df) < 15:
             return []
 
@@ -499,6 +524,54 @@ class SignalEngine:
 
         return enriched
 
+    def _evaluate_final_mtf(
+        self,
+        bars_df: pd.DataFrame,
+        *,
+        bar_delta_pct: float = 0.0,
+        current_price: float = 0.0,
+        now: datetime | None = None,
+    ) -> list[dict]:
+        now = now or datetime.now()
+        raw = self.final_engine.evaluate(
+            bars_df,
+            bar_delta_pct=bar_delta_pct,
+            current_price=current_price,
+            now=now,
+        )
+        if not raw:
+            self._last_signals = []
+            return []
+
+        enriched = []
+        for sig in raw:
+            item = dict(sig)
+            contributors = list(item.get("contributors", []))
+            item["confluence_count"] = len(contributors) + 1
+            item["confirming_signals"] = contributors
+            item["gold_tier"] = item.get("confidence_pct", 0) >= 90
+            item["tier_label"] = "GOLD" if item["confidence_pct"] >= 90 else "SILVER" if item["confidence_pct"] >= 80 else ""
+            item["regime_match"] = True
+            item["regime_mult"] = 1.0
+            item["time_edge"] = f"Final MTF {item.get('lead_timeframe_min', '?')}m"
+            item["time_mult"] = 1.0
+            item["day_edge"] = "Final engine"
+            item["day_mult"] = 1.0
+            item["delta_pct"] = round(bar_delta_pct, 1)
+            item["delta_aligned"] = True
+            item["quality_mult"] = round(item.get("confidence_pct", 0) / 100.0, 2)
+            item["dir_bias"] = "dominant"
+            item["conflicted"] = False
+            item["entry_type"] = item.get("entry_type", "limit")
+            enriched.append(item)
+
+        enriched.sort(key=lambda s: s["confidence_pct"], reverse=True)
+        self._last_signals = enriched
+        for sig in enriched[:3]:
+            self._signal_history.append(sig)
+        self._signal_history = self._signal_history[-50:]
+        return enriched
+
     def _resolve_direction_conflict(
         self,
         signals: list[dict],
@@ -597,6 +670,8 @@ class SignalEngine:
 
     def get_history(self) -> list[dict]:
         """Return last 50 signal evaluations."""
+        if self.engine_mode in {"final_mtf", "final_mtf_v2", "final_mtf_v3"}:
+            return self.final_engine.get_history()
         return list(reversed(self._signal_history))
 
     def get_market_state(
@@ -720,7 +795,342 @@ class SignalEngine:
             "hour": hour,
             "dow": dow,
             "timestamp": now.isoformat(),
+            "trader_guide": self._build_trader_guide(bars_df, current_price=current_price),
         }
+
+    def _build_trader_guide(self, bars_df: pd.DataFrame, *, current_price: float) -> dict:
+        guide_5m = self._compute_tf_guide(bars_df, timeframe_min=5, current_price=current_price)
+        guide_15m = self._compute_tf_guide(bars_df, timeframe_min=15, current_price=current_price)
+
+        score = 0
+        if guide_15m["bias"] == "long":
+            score += 2
+        elif guide_15m["bias"] == "short":
+            score -= 2
+        if guide_5m["bias"] == "long":
+            score += 1
+        elif guide_5m["bias"] == "short":
+            score -= 1
+
+        if score >= 2:
+            overall_bias = "long"
+        elif score <= -2:
+            overall_bias = "short"
+        elif score > 0:
+            overall_bias = "neutral_to_long"
+        elif score < 0:
+            overall_bias = "neutral_to_short"
+        else:
+            overall_bias = "neutral"
+
+        alignment_bonus = 12 if guide_5m["bias"] == guide_15m["bias"] and guide_5m["bias"] != "neutral" else 0
+        overall_confidence = min(95, max(40, 52 + abs(score) * 10 + alignment_bonus))
+
+        zones = []
+        for tf_guide in (guide_5m, guide_15m):
+            if tf_guide["continuation_zone"]:
+                zones.append(
+                    {
+                        "label": f"{tf_guide['timeframe']} continuation",
+                        "direction": tf_guide["bias"] if tf_guide["bias"] != "neutral" else overall_bias,
+                        "low": tf_guide["continuation_zone"]["low"],
+                        "high": tf_guide["continuation_zone"]["high"],
+                        "why": tf_guide["continuation_note"],
+                    }
+                )
+            if tf_guide["reversal_zone"]:
+                zones.append(
+                    {
+                        "label": f"{tf_guide['timeframe']} reversal watch",
+                        "direction": tf_guide["reversal_side"],
+                        "low": tf_guide["reversal_zone"]["low"],
+                        "high": tf_guide["reversal_zone"]["high"],
+                        "why": tf_guide["reversal_note"],
+                    }
+                )
+
+        nearest_zones = sorted(
+            zones,
+            key=lambda item: min(abs(item["low"] - current_price), abs(item["high"] - current_price)),
+        )[:4]
+
+        if overall_bias == "long":
+            summary = "Prefer LONG continuation while 15m holds value. Short only on confirmed rejection / loss of 5m trigger."
+        elif overall_bias == "short":
+            summary = "Prefer SHORT continuation while 15m stays heavy. Long only on confirmed reclaim / absorption."
+        elif overall_bias == "neutral_to_long":
+            summary = "Bias slightly long, but 5m confirmation matters. Best entries are pullbacks into value."
+        elif overall_bias == "neutral_to_short":
+            summary = "Bias slightly short, but 5m confirmation matters. Best entries are pops into resistance."
+        else:
+            summary = "No clean dominance. Treat current area as rotational until 5m and 15m align."
+
+        best_long_zone = self._pick_directional_zone("long", guide_5m, guide_15m, current_price=current_price)
+        best_short_zone = self._pick_directional_zone("short", guide_5m, guide_15m, current_price=current_price)
+        continuation = self._build_continuation_summary(overall_bias, guide_5m, guide_15m, current_price=current_price)
+
+        return {
+            "overall_bias": overall_bias,
+            "confidence": overall_confidence,
+            "summary": summary,
+            "continuation": continuation,
+            "best_long_zone": best_long_zone,
+            "best_short_zone": best_short_zone,
+            "tf_5m": guide_5m,
+            "tf_15m": guide_15m,
+            "zones": nearest_zones,
+        }
+
+    def _compute_tf_guide(self, bars_df: pd.DataFrame, *, timeframe_min: int, current_price: float) -> dict:
+        frame = self._resample_for_guide(bars_df, timeframe_min)
+        empty = {
+            "timeframe": f"{timeframe_min}m",
+            "bias": "neutral",
+            "strength": 0,
+            "reversal_risk": "unknown",
+            "reversal_side": "neutral",
+            "continuation_valid": False,
+            "invalidation_level": round(current_price, 2) if current_price else 0.0,
+            "continuation_zone": None,
+            "reversal_zone": None,
+            "continuation_note": "Not enough bars.",
+            "reversal_note": "Not enough bars.",
+            "trigger_level": round(current_price, 2) if current_price else 0.0,
+        }
+        if frame.empty or len(frame) < 20:
+            return empty
+
+        last = frame.iloc[-1]
+        prev = frame.iloc[-2]
+        close = float(last["close"])
+        high = float(last["high"])
+        low = float(last["low"])
+        ema20 = float(last["ema20"])
+        ema50 = float(last["ema50"])
+        vwap = float(last["vwap"])
+        atr = max(0.25, float(last["atr"]))
+        rsi = float(last["rsi"])
+        close_pos = 50.0 if high == low else ((close - low) / (high - low)) * 100.0
+
+        long_score = sum([
+            close >= ema20,
+            ema20 >= ema50,
+            close >= vwap,
+            close >= float(prev["close"]),
+        ])
+        short_score = sum([
+            close <= ema20,
+            ema20 <= ema50,
+            close <= vwap,
+            close <= float(prev["close"]),
+        ])
+        if long_score >= 3 and long_score > short_score:
+            bias = "long"
+            strength = long_score
+        elif short_score >= 3 and short_score > long_score:
+            bias = "short"
+            strength = short_score
+        else:
+            bias = "neutral"
+            strength = max(long_score, short_score)
+
+        recent = frame.tail(7 if timeframe_min == 5 else 5).iloc[:-1]
+        swing_high = float(recent["high"].max()) if not recent.empty else high
+        swing_low = float(recent["low"].min()) if not recent.empty else low
+        extension = abs(close - ema20) / atr
+
+        continuation_center = (ema20 + vwap) / 2.0
+        continuation_half = max(atr * 0.35, abs(ema20 - vwap) / 2.0, 1.0)
+        continuation_zone = {
+            "low": round(min(continuation_center - continuation_half, continuation_center + continuation_half), 2),
+            "high": round(max(continuation_center - continuation_half, continuation_center + continuation_half), 2),
+        }
+
+        if bias == "long":
+            reversal_side = "short"
+            reversal_center = swing_high
+            reversal_score = sum([
+                rsi >= 67,
+                extension >= 1.1,
+                close_pos <= 45,
+                close < float(prev["close"]),
+            ])
+            trigger_level = round(max(swing_low, ema20), 2)
+            continuation_valid = close >= trigger_level
+            invalidation_level = trigger_level
+            continuation_note = f"Best LONG area is pullback into VWAP/EMA20 cluster while above {trigger_level:.2f}."
+            reversal_note = (
+                f"{timeframe_min}m SHORT reversal becomes meaningful only after rejection of {reversal_center:.2f} "
+                f"and loss of {trigger_level:.2f}."
+            )
+        elif bias == "short":
+            reversal_side = "long"
+            reversal_center = swing_low
+            reversal_score = sum([
+                rsi <= 33,
+                extension >= 1.1,
+                close_pos >= 55,
+                close > float(prev["close"]),
+            ])
+            trigger_level = round(min(swing_high, ema20), 2)
+            continuation_valid = close <= trigger_level
+            invalidation_level = trigger_level
+            continuation_note = f"Best SHORT area is pop into VWAP/EMA20 cluster while below {trigger_level:.2f}."
+            reversal_note = (
+                f"{timeframe_min}m LONG reversal becomes meaningful only after reclaim of {reversal_center:.2f} "
+                f"and push back above {trigger_level:.2f}."
+            )
+        else:
+            reversal_side = "neutral"
+            reversal_center = close
+            reversal_score = 1
+            trigger_level = round((swing_high + swing_low) / 2.0, 2)
+            continuation_valid = False
+            invalidation_level = trigger_level
+            continuation_note = "No dominant side. Treat VWAP/EMA20 area as rotation zone."
+            reversal_note = f"Wait for break/reclaim of {trigger_level:.2f} before leaning directional."
+
+        reversal_half = max(atr * 0.3, 1.0)
+        reversal_zone = {
+            "low": round(reversal_center - reversal_half, 2),
+            "high": round(reversal_center + reversal_half, 2),
+        }
+        reversal_risk = "high" if reversal_score >= 3 else "medium" if reversal_score == 2 else "low"
+
+        return {
+            "timeframe": f"{timeframe_min}m",
+            "bias": bias,
+            "strength": int(strength),
+            "reversal_risk": reversal_risk,
+            "reversal_side": reversal_side,
+            "continuation_valid": continuation_valid,
+            "invalidation_level": invalidation_level,
+            "continuation_zone": continuation_zone,
+            "reversal_zone": reversal_zone,
+            "continuation_note": continuation_note,
+            "reversal_note": reversal_note,
+            "trigger_level": trigger_level,
+        }
+
+    def _pick_directional_zone(
+        self,
+        direction: str,
+        guide_5m: dict,
+        guide_15m: dict,
+        *,
+        current_price: float,
+    ) -> dict | None:
+        candidates: list[dict] = []
+        for tf_guide in (guide_5m, guide_15m):
+            if direction == "long" and tf_guide["bias"] == "long" and tf_guide["continuation_zone"]:
+                candidates.append(
+                    {
+                        "label": f"Best {tf_guide['timeframe']} LONG zone",
+                        "timeframe": tf_guide["timeframe"],
+                        "low": tf_guide["continuation_zone"]["low"],
+                        "high": tf_guide["continuation_zone"]["high"],
+                        "invalidation": tf_guide["invalidation_level"],
+                        "why": tf_guide["continuation_note"],
+                    }
+                )
+            if direction == "short" and tf_guide["bias"] == "short" and tf_guide["continuation_zone"]:
+                candidates.append(
+                    {
+                        "label": f"Best {tf_guide['timeframe']} SHORT zone",
+                        "timeframe": tf_guide["timeframe"],
+                        "low": tf_guide["continuation_zone"]["low"],
+                        "high": tf_guide["continuation_zone"]["high"],
+                        "invalidation": tf_guide["invalidation_level"],
+                        "why": tf_guide["continuation_note"],
+                    }
+                )
+        if not candidates:
+            return None
+        candidates.sort(key=lambda item: min(abs(item["low"] - current_price), abs(item["high"] - current_price)))
+        return candidates[0]
+
+    def _build_continuation_summary(
+        self,
+        overall_bias: str,
+        guide_5m: dict,
+        guide_15m: dict,
+        *,
+        current_price: float,
+    ) -> dict:
+        if overall_bias in {"long", "neutral_to_long"}:
+            primary = guide_5m if guide_5m["bias"] == "long" else guide_15m
+            return {
+                "side": "long",
+                "valid": bool(primary.get("continuation_valid")),
+                "invalidation": primary.get("invalidation_level"),
+                "message": (
+                    f"LONG continuation is {'valid' if primary.get('continuation_valid') else 'fragile'} "
+                    f"while price holds above {float(primary.get('invalidation_level', current_price)):.2f}."
+                ),
+            }
+        if overall_bias in {"short", "neutral_to_short"}:
+            primary = guide_5m if guide_5m["bias"] == "short" else guide_15m
+            return {
+                "side": "short",
+                "valid": bool(primary.get("continuation_valid")),
+                "invalidation": primary.get("invalidation_level"),
+                "message": (
+                    f"SHORT continuation is {'valid' if primary.get('continuation_valid') else 'fragile'} "
+                    f"while price stays below {float(primary.get('invalidation_level', current_price)):.2f}."
+                ),
+            }
+        return {
+            "side": "neutral",
+            "valid": False,
+            "invalidation": round(current_price, 2),
+            "message": "No continuation edge right now. Wait for 5m and 15m to align.",
+        }
+
+    def _resample_for_guide(self, bars_df: pd.DataFrame, timeframe_min: int) -> pd.DataFrame:
+        frame = bars_df.copy()
+        if "timestamp" not in frame.columns and "datetime" in frame.columns:
+            frame["timestamp"] = pd.to_datetime(frame["datetime"], errors="coerce")
+        elif "timestamp" in frame.columns:
+            frame["timestamp"] = pd.to_datetime(frame["timestamp"], errors="coerce")
+        if "timestamp" not in frame.columns:
+            return pd.DataFrame()
+        frame = frame.dropna(subset=["timestamp"]).sort_values("timestamp")
+        frame = frame.set_index("timestamp")
+        agg = {
+            "open": "first",
+            "high": "max",
+            "low": "min",
+            "close": "last",
+            "volume": "sum",
+        }
+        if "delta" in frame.columns:
+            agg["delta"] = "sum"
+        out = frame.resample(f"{timeframe_min}min").agg(agg).dropna(subset=["open"]).copy()
+        if out.empty:
+            return out
+
+        out["ema20"] = out["close"].ewm(span=20, adjust=False).mean()
+        out["ema50"] = out["close"].ewm(span=50, adjust=False).mean()
+        typical = (out["high"] + out["low"] + out["close"]) / 3.0
+        cum_vol = out["volume"].cumsum().replace(0, pd.NA)
+        out["vwap"] = (typical * out["volume"]).cumsum() / cum_vol
+        delta = out["close"].diff()
+        gain = delta.clip(lower=0).rolling(14).mean()
+        loss = (-delta.clip(upper=0)).rolling(14).mean().replace(0, pd.NA)
+        rs = gain / loss
+        out["rsi"] = (100 - (100 / (1 + rs))).fillna(50)
+        prev_close = out["close"].shift(1)
+        tr = pd.concat(
+            [
+                out["high"] - out["low"],
+                (out["high"] - prev_close).abs(),
+                (out["low"] - prev_close).abs(),
+            ],
+            axis=1,
+        ).max(axis=1)
+        out["atr"] = tr.rolling(14).mean().fillna(tr.expanding().mean()).fillna(0.0)
+        out.reset_index(inplace=True)
+        return out
 
     def compute_weighted_zones(self, signals: list[dict]) -> dict:
         """Compute weighted average entry/TP/SL across all signals.

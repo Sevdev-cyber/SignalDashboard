@@ -34,7 +34,26 @@ Te pliki przyjmują obrobione przez Wizjonera sygnały i emitują je po sieci do
 ## ⚙️ JAK TO DZIAŁA W PRAKTYCE? (Cykl Życia Sygnału)
 
 1.  **NARODZINY (NinjaTrader / TCP)**: Gdy na giełdzie dochodzi do transakcji, router `TickStreamerMirror` ze włączonego softu NinjaTrader wysyła linijkę tekstu przez port TCP.
-2.  **INKUBACJA (`tcp_adapter.py` -> `bar_builder.py`)**: Serwer w Pythonie przechwytuje ten ruch. Buduje świecę 5-minutową (M5) obłożoną w kalkulacje Cumulative Delta.
-3.  **OCENA (`Wizjoner` / `hsb`)**: Każde zamknięcie świecy budzi Wizjonera. Oblicza on nachylenia rzeki (EMA50), reżim rynku i puszcza weryfikatory PULLBACK, FVG, SWEEP. Jeżeli odrzuca – sygnał ginie. 
+2.  **INKUBACJA (`tcp_adapter.py` -> `bar_builder.py`)**: Serwer w Pythonie przechwytuje ten ruch. Buduje świecę w aktywnym TF dashboardu. W nowym trybie finalnym zalecany jest feed 1-minutowy, bo silnik sam składa z niego warstwy 3m i 30m.
+3.  **OCENA (`Wizjoner` / `hsb`)**: Każde zamknięcie świecy budzi Wizjonera. W trybie `final_mtf_v3` sygnały pochodzą z finalnego silnika multi-timeframe z katalogu `NewSignal`, a nie ze starego jednowarstwowego rankera. 
 4.  **ROZGŁOSZENIE (`signal_server.py`)**: Wizjoner kompresuje listę topowych wyników + 800 świec zysku w JSON. `signal_server` wysyła to do chmury / lokalnego przeglądarkowego websocketu.
 5.  **EGZEKUCJA WIZUALNA (`index_railway.html`)**: Twój monitor odświeża dzwonkiem wskaźnik i zaznacza punkt wejścia na wykresie.
+
+---
+
+## TRYB FINAL MTF
+
+Żeby zobaczyć nowy feed w dashboardzie:
+
+1. Ustaw TickStreamer Mirror tak, żeby wysyłał bary 1-minutowe.
+2. Uruchom serwer z env:
+
+```bash
+DASHBOARD_BAR_TF_MIN=1 SIGNAL_ENGINE_MODE=final_mtf_v3 python signal_server.py --port 5557 --ws-port 8080
+```
+
+Uwagi:
+- `DASHBOARD_BAR_TF_MIN=1` musi być ustawione przed startem procesu
+- finalny engine najlepiej działa na wejściu 1m
+- 3m i 30m są budowane wewnętrznie przez silnik
+- dashboard pokazuje też `Trader Guide` i lekkie `L2 Reaction` z tick + bid/ask

@@ -1,0 +1,145 @@
+Trader Guide + L2 integration
+Date: 2026-04-13
+
+Purpose
+- The dashboard should work as a trader assistant, not only a signal list.
+- It now combines:
+  - signal entries
+  - 5m and 15m directional guidance
+  - continuation validity / invalidation
+  - best long / short value zones
+  - lightweight live L2 reaction zones from tick + bid/ask feed
+
+Main files
+- Engine logic:
+  - /Users/sacredforest/Trading Setup/SignalDashboard/signal_engine.py
+- Live server + tick/L2 enrichment:
+  - /Users/sacredforest/Trading Setup/SignalDashboard/signal_server.py
+- Local dashboard UI:
+  - /Users/sacredforest/Trading Setup/SignalDashboard/index.html
+- Railway dashboard UI:
+  - /Users/sacredforest/Trading Setup/SignalDashboard/index_railway.html
+- Final signal engine:
+  - /Users/sacredforest/Trading Setup/NewSignal/final_signal_engine.py
+
+What the trader guide shows
+1. Overall bias
+- long / short / neutral / neutral_to_long / neutral_to_short
+
+2. 5m guide
+- local bias
+- reversal risk
+- continuation zone
+- reversal watch zone
+- trigger level
+
+3. 15m guide
+- same as 5m, but slower and more structural
+
+4. Continuation block
+- says whether continuation is still valid
+- gives explicit invalidation level
+
+5. Best long zone / best short zone
+- nearest best continuation area per side
+- includes invalidation level and why this zone matters
+
+6. L2 reaction
+- micro bias from recent live ticks
+- defended bid / defended ask reaction areas
+- spread
+- short-term imbalance
+- large buy / large sell counts
+
+Current live data requirements
+- Required for normal guide + signals:
+  - 1m bars into signal_server
+  - live ticks with price, size, aggressor
+- Required for lightweight L2 reaction:
+  - tick feed with bid + ask included
+- Current TickStreamer adapter already supports:
+  - T;ts;price;size;aggressor;bid;ask
+
+What current L2 uses
+- It does NOT use full depth ladder yet.
+- It uses recent live ticks and BBO:
+  - repeated bid levels
+  - repeated ask levels
+  - sell hits into bid
+  - buy lifts into ask
+  - local spread
+  - recent aggressive buy/sell imbalance
+
+This gives practical zones:
+- L2 support reaction
+- L2 resistance reaction
+
+How it is injected
+- signal_engine.py builds trader_guide from bars only
+- signal_server.py enriches state with live tick-based L2 guide
+- signal_server.py appends L2 zones into trader_guide.zones
+- frontend renders trader_guide directly
+
+How to run
+- On the process that runs signal_server.py set:
+  - DASHBOARD_BAR_TF_MIN=1
+  - SIGNAL_ENGINE_MODE=final_mtf_v3
+
+Example start command
+- python signal_server.py --port 5557 --ws-port 8080
+
+Recommended real command
+- DASHBOARD_BAR_TF_MIN=1 SIGNAL_ENGINE_MODE=final_mtf_v3 python signal_server.py --port 5557 --ws-port 8080
+
+Tick / data side
+- NT8 / TickStreamerMirror should send:
+  - 1m bars
+  - ticks
+  - bid/ask on ticks if available
+
+If you use Railway
+- Set envs on the service that actually runs signal_server.py
+- Railway front relay alone is not enough if the computation happens elsewhere
+
+Bookmap path
+- Current dashboard L2 guide works without Bookmap, using TickStreamer bid/ask
+- Full Bookmap bridge exists here:
+  - /Users/sacredforest/Trading Setup/SignalDashboard/bookmap_addon/README.md
+- Bookmap Java bridge can send richer JSON lines:
+  - trade
+  - depth
+  - bbo
+  - stats
+
+What is not wired yet
+- Full Bookmap depth / liquidity ladder is not yet connected into signal_server.py
+- That means current L2 is "lightweight microstructure", not full DOM analytics
+
+If you want full Bookmap/L2 later
+- Next step is to open a dedicated TCP/JSON listener in signal_server.py for:
+  - type=depth
+  - type=bbo
+  - type=stats
+- Then trader guide can be upgraded with:
+  - real bid/ask liquidity walls
+  - stacked imbalance levels
+  - large trade clusters
+  - absorption zones from Bookmap stats
+
+Quick smoke checks
+- Backend:
+  - python3 -m py_compile /Users/sacredforest/Trading Setup/SignalDashboard/signal_engine.py
+  - python3 -m py_compile /Users/sacredforest/Trading Setup/SignalDashboard/signal_server.py
+- Visual:
+  - after dashboard refresh, right panel should show:
+    - Trader Guide
+    - Continuation / invalidation
+    - Best long / short zone
+    - L2 Reaction
+
+Practical interpretation
+- 5m tells you where the short-term execution edge is
+- 15m tells you whether that idea fits the slower structure
+- continuation block tells you when the idea is still valid
+- best zone tells you where to stalk entry
+- L2 reaction tells you where price is likely to bounce or reject immediately

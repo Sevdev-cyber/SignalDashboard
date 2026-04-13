@@ -10,7 +10,7 @@
 │  ┌──────────────────┐    TCP:5557    ┌───────────────┐  │
 │  │ NT8               │ ────────────→ │ Wizjoner       │  │
 │  │ TickStreamerMirror │ ← ticki/bary │ signal_server  │  │
-│  │ (chart 5min)      │              │ (Python)       │  │
+│  │ (chart 1min)      │              │ (Python)       │  │
 │  └──────────────────┘              │                 │  │
 │                                     │  WS:8082       │  │
 │                                     │  ↓             │  │
@@ -42,12 +42,14 @@
 /Users/sacredforest/Trading Setup/
 ├── SignalDashboard/                    ← GŁÓWNY PROJEKT (git repo)
 │   ├── signal_server.py               ← Wizjoner backend (TCP→WS→Relay)
-│   ├── signal_engine.py               ← Engine sygnałów (obecny v1)
+│   ├── signal_engine.py               ← Dashboard wrapper (final_mtf / v2 / v3)
 │   ├── bar_builder.py                 ← OHLCV → ATR/EMA/VWAP/Delta/CVD
 │   ├── tcp_adapter.py                 ← TCP klient do NT8 TickStreamer
 │   ├── compat.py                      ← Python 3.9 dataclass patch
 │   ├── railway_relay.py               ← Railway relay server (deploy na Railway)
-│   ├── index_railway.html             ← Dashboard frontend (deploy na Railway)
+│   ├── index_railway.html             ← Railway frontend (current live dashboard)
+│   ├── DEPLOY_GUIDE.md                ← Ten plik
+│   ├── TRADER_GUIDE_INTEGRATION_2026-04-13.txt ← Instrukcja guide + L2
 │   ├── session_levels.py              ← IB/session level calculation
 │   ├── structure_filter.py            ← Swing high/low detection
 │   │
@@ -95,7 +97,7 @@
 │   └── verify_signals.py              ← Weryfikacja sygnałów na VPS
 │
 ├── NewSignal/                         ← NOWY ENGINE v2
-│   ├── final_signal_engine.py         ← FinalSignalEngine (multi-TF, 65.5% WR)
+│   ├── final_signal_engine.py         ← FinalSignalEngine (multi-TF variants v1/v2/v3)
 │   ├── newsignal_core.py             ← Core generator (78KB, wszystkie families)
 │   ├── v2/
 │   │   └── signal_engine_v2.py        ← Drop-in wrapper
@@ -216,7 +218,7 @@ tcp_adapter.py — parsuje TCP stream
   ├── warmup_bars → bar_builder.warmup_bars_to_df() → enrich_bars()
   │                  → apply_tick_deltas() (datetime64[ns] fix!)
   │
-  ├── live bar_close → BarAccumulator (resample do 5min)
+  ├── live bar_close → BarAccumulator (resample do aktywnego TF, rekomendowane 1min)
   │                    → enrich_bars() (ATR, EMA, VWAP, Delta, CVD)
   │
   └── live ticks → on_tick() → buy/sell vol accumulator
@@ -226,13 +228,12 @@ tcp_adapter.py — parsuje TCP stream
   ▼
 signal_engine.py — evaluate(bars_df)
   │
-  ├── composite.generate(context) → 14 detektorów
-  ├── SIGNAL_SCORE multiplier (0-100, data-driven)
-  ├── SIGNAL_TIME_PROFILE (bars_to_tp, max_hold, optimal_min)
-  ├── Gold/Silver tier (confluence + prime hours + regime)
-  ├── Direction conflict (tag, nie suppress)
-  ├── RR < 1:1 penalty
-  └── Confidence 0-100%
+  ├── domyślnie: FinalSignalEngine z katalogu NewSignal
+  ├── obsługiwane tryby: final_mtf, final_mtf_v2, final_mtf_v3
+  ├── rekomendowany tryb: final_mtf_v3
+  ├── trader_guide: 5m / 15m bias, continuation, invalidation, best zones
+  ├── L2 reaction: lekkie microstructure z live tick + bid/ask
+  └── fallback: stary enrich/ranking path gdy engine_mode nie jest final_mtf*
   │
   ▼
 signal_server.py — _evaluate_and_broadcast()
@@ -251,6 +252,8 @@ signal_server.py — _evaluate_and_broadcast()
 @echo off
 TITLE Wizjoner Signal Dashboard - Backend
 cd C:\SignalDashboard
+set DASHBOARD_BAR_TF_MIN=1
+set SIGNAL_ENGINE_MODE=final_mtf_v3
 python signal_server.py --port 5557 --ws-port 8082 --relay-url https://web-production-3ff3f.up.railway.app/push --relay-secret SacredForestSignal123
 pause
 ```
@@ -270,6 +273,10 @@ UseTickWarmup   = true          ← włączone (potrzebne dla delta/CVD)
 AcceptCommands  = false         ← true jeśli chcesz trade.py zlecenia
 AccountName     = "Sim101"      ← zmień na konto Bulenox
 ```
+
+Rekomendacja:
+- feed barów ustaw na `1m`
+- ticki muszą zawierać `bid` i `ask`, bo trader guide używa lekkiego `L2 reaction`
 
 Protokół TCP:
 ```
@@ -299,6 +306,10 @@ Pliki na Railway:
 
 Deploy: `git push origin main` → Railway auto-builds
 
+Stan na 2026-04-13:
+- lokalny kod ma już `Trader Guide` + `L2 Reaction`
+- live Railway URL jeszcze nie pokazuje tych sekcji, więc Railway jest opóźniony względem lokalnego repo i wymaga nowego deploya
+
 Endpointy:
 - `POST /push` — Wizjoner wysyła dane (header: X-Push-Secret)
 - `GET /ws` — WebSocket dla przeglądarki
@@ -310,7 +321,7 @@ Endpointy:
 | Port | Gdzie | Co |
 |------|-------|----|
 | 5557 | VPS localhost | NT8 → Wizjoner (TCP) |
-| 8082 | VPS 0.0.0.0 | Wizjoner → browser (WebSocket) |
+| 8082 | VPS 0.0.0.0 | Wizjoner → browser (WebSocket, lokalnie na VPS) |
 | 9901 | Mac localhost | Bookmap addon → Wizjoner (TCP) |
 | 443 | Railway | Dashboard HTTPS/WSS |
 
@@ -320,7 +331,7 @@ Endpointy:
 
 | Gdzie | Python | Venv |
 |-------|--------|------|
-| VPS | `C:\Python3\python.exe` | brak (systemowy) |
+| VPS | `python.exe` | brak (systemowy) |
 | Mac (backtest) | `/Users/sacredforest/Trading Setup/Testing Nautilus/venv/bin/python` | nautilus_trader |
 | Mac (system) | `/usr/bin/python3` lub brew | bookmap, websocket-client |
 
@@ -341,6 +352,9 @@ cd "/Users/sacredforest/Trading Setup" && \
 
 # Test sygnałów na VPS
 ssh Administrator@66.42.117.137 "cd /d C:\SignalDashboard && python verify_signals.py"
+
+# Test z nowym engine (na VPS lub lokalnie)
+DASHBOARD_BAR_TF_MIN=1 SIGNAL_ENGINE_MODE=final_mtf_v3 python signal_server.py --port 5557 --ws-port 8082
 
 # Backtest 14 dni (na Macu)
 /Users/sacredforest/Trading\ Setup/Testing\ Nautilus/venv/bin/python \
