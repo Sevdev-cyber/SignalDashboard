@@ -1273,17 +1273,58 @@ class SignalEngine:
         if len(bars_df) < 2:
             return "unknown"
         try:
-            first = bars_df.iloc[0]
-            last = bars_df.iloc[-1]
+            # Use a recent window for dashboard regime so the badge reflects the
+            # current tape, not the entire warmup block loaded from overnight.
+            lookback = min(len(bars_df), 72)  # ~72min on 1m, still reasonable on higher TF
+            recent = bars_df.tail(lookback).copy()
+
+            first = recent.iloc[0]
+            last = recent.iloc[-1]
             op = float(first.get("open", 0))
             cl = float(last.get("close", 0))
             move = cl - op
-            closes = pd.to_numeric(bars_df["close"], errors="coerce").dropna()
+
+            closes = pd.to_numeric(recent["close"], errors="coerce").dropna()
             total_path = float(closes.diff().abs().sum()) if len(closes) > 1 else abs(move)
+
+            ema20 = float(last.get("ema_20", 0)) if "ema_20" in recent.columns else 0.0
+            ema50 = float(last.get("ema_50", 0)) if "ema_50" in recent.columns else 0.0
+            vwap = float(last.get("vwap", 0)) if "vwap" in recent.columns else 0.0
+            atr = float(last.get("atr", 20)) if "atr" in recent.columns else 20.0
+            ema20_prev = float(recent.iloc[-3].get("ema_20", 0)) if len(recent) >= 3 and "ema_20" in recent.columns else 0.0
+            ema50_prev = float(recent.iloc[-3].get("ema_50", 0)) if len(recent) >= 3 and "ema_50" in recent.columns else 0.0
+
             info = infer_regime(
-                move_from_open=move, total_path=total_path,
-                current_close=cl, open_price=op,
+                move_from_open=move,
+                total_path=total_path,
+                current_close=cl,
+                open_price=op,
+                ema20=ema20,
+                ema50=ema50,
+                ema20_prev=ema20_prev,
+                ema50_prev=ema50_prev,
+                vwap=vwap,
+                atr=atr,
             )
+
+            # Dashboard should prefer an actionable "current tape" read.
+            # If recent structure is clearly stacked and lifting above VWAP,
+            # don't leave the badge stuck on chop/range.
+            recent_range = float(recent["high"].max() - recent["low"].min()) if {"high", "low"} <= set(recent.columns) else total_path
+            recent_eff = abs(move) / max(total_path, 1e-9)
+            bullish_stack = ema20 > ema50 and cl > ema20 and cl > vwap
+            bearish_stack = ema20 < ema50 and cl < ema20 and cl < vwap
+
+            if info.regime in {"chop", "range", "transition"}:
+                if bullish_stack and move > max(atr * 1.2, 8.0) and recent_eff >= 0.16:
+                    return "trend_up"
+                if bearish_stack and move < -max(atr * 1.2, 8.0) and recent_eff >= 0.16:
+                    return "trend_down"
+                if bullish_stack and recent_range > max(atr * 2.0, 12.0) and move > 0:
+                    return "transition"
+                if bearish_stack and recent_range > max(atr * 2.0, 12.0) and move < 0:
+                    return "transition"
+
             return info.regime
         except Exception:
             return "unknown"
