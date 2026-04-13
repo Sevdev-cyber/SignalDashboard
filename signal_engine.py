@@ -828,26 +828,8 @@ class SignalEngine:
 
         zones = []
         for tf_guide in (guide_5m, guide_15m):
-            if tf_guide["continuation_zone"]:
-                zones.append(
-                    {
-                        "label": f"{tf_guide['timeframe']} continuation",
-                        "direction": tf_guide["bias"] if tf_guide["bias"] != "neutral" else overall_bias,
-                        "low": tf_guide["continuation_zone"]["low"],
-                        "high": tf_guide["continuation_zone"]["high"],
-                        "why": tf_guide["continuation_note"],
-                    }
-                )
-            if tf_guide["reversal_zone"]:
-                zones.append(
-                    {
-                        "label": f"{tf_guide['timeframe']} reversal watch",
-                        "direction": tf_guide["reversal_side"],
-                        "low": tf_guide["reversal_zone"]["low"],
-                        "high": tf_guide["reversal_zone"]["high"],
-                        "why": tf_guide["reversal_note"],
-                    }
-                )
+            for zone in tf_guide.get("guide_zones", []):
+                zones.append(zone)
 
         nearest_zones = sorted(
             zones,
@@ -868,11 +850,13 @@ class SignalEngine:
         best_long_zone = self._pick_directional_zone("long", guide_5m, guide_15m, current_price=current_price)
         best_short_zone = self._pick_directional_zone("short", guide_5m, guide_15m, current_price=current_price)
         continuation = self._build_continuation_summary(overall_bias, guide_5m, guide_15m, current_price=current_price)
+        prediction = self._build_prediction_summary(overall_bias, guide_5m, guide_15m, current_price=current_price)
 
         return {
             "overall_bias": overall_bias,
             "confidence": overall_confidence,
             "summary": summary,
+            "prediction": prediction,
             "continuation": continuation,
             "best_long_zone": best_long_zone,
             "best_short_zone": best_short_zone,
@@ -945,6 +929,7 @@ class SignalEngine:
             "low": round(min(continuation_center - continuation_half, continuation_center + continuation_half), 2),
             "high": round(max(continuation_center - continuation_half, continuation_center + continuation_half), 2),
         }
+        trigger_half = max(atr * 0.18, 0.75)
 
         if bias == "long":
             reversal_side = "short"
@@ -959,6 +944,10 @@ class SignalEngine:
             continuation_valid = close >= trigger_level
             invalidation_level = trigger_level
             continuation_note = f"Best LONG area is pullback into VWAP/EMA20 cluster while above {trigger_level:.2f}."
+            prediction_note = (
+                f"Predicted LONG only if pullback holds value and reclaims {trigger_level:.2f}. "
+                f"Do not chase extension away from value."
+            )
             reversal_note = (
                 f"{timeframe_min}m SHORT reversal becomes meaningful only after rejection of {reversal_center:.2f} "
                 f"and loss of {trigger_level:.2f}."
@@ -976,6 +965,10 @@ class SignalEngine:
             continuation_valid = close <= trigger_level
             invalidation_level = trigger_level
             continuation_note = f"Best SHORT area is pop into VWAP/EMA20 cluster while below {trigger_level:.2f}."
+            prediction_note = (
+                f"Predicted SHORT only if pop into value gets rejected and price stays below {trigger_level:.2f}. "
+                f"Do not short the hole away from value."
+            )
             reversal_note = (
                 f"{timeframe_min}m LONG reversal becomes meaningful only after reclaim of {reversal_center:.2f} "
                 f"and push back above {trigger_level:.2f}."
@@ -988,6 +981,7 @@ class SignalEngine:
             continuation_valid = False
             invalidation_level = trigger_level
             continuation_note = "No dominant side. Treat VWAP/EMA20 area as rotation zone."
+            prediction_note = f"Wait for break/reclaim of {trigger_level:.2f}. No clean predictive edge yet."
             reversal_note = f"Wait for break/reclaim of {trigger_level:.2f} before leaning directional."
 
         reversal_half = max(atr * 0.3, 1.0)
@@ -996,6 +990,61 @@ class SignalEngine:
             "high": round(reversal_center + reversal_half, 2),
         }
         reversal_risk = "high" if reversal_score >= 3 else "medium" if reversal_score == 2 else "low"
+        trigger_zone = {
+            "low": round(trigger_level - trigger_half, 2),
+            "high": round(trigger_level + trigger_half, 2),
+        }
+        guide_zones = []
+        if continuation_zone:
+            guide_zones.append(
+                {
+                    "label": f"{timeframe_min}m predicted area",
+                    "stage": "predicted",
+                    "direction": bias if bias != "neutral" else "neutral",
+                    "low": continuation_zone["low"],
+                    "high": continuation_zone["high"],
+                    "trigger": trigger_level,
+                    "why": prediction_note,
+                }
+            )
+            guide_zones.append(
+                {
+                    "label": f"{timeframe_min}m watch area",
+                    "stage": "watch",
+                    "direction": bias if bias != "neutral" else "neutral",
+                    "low": continuation_zone["low"],
+                    "high": continuation_zone["high"],
+                    "trigger": trigger_level,
+                    "why": continuation_note,
+                }
+            )
+        if bias != "neutral":
+            guide_zones.append(
+                {
+                    "label": f"{timeframe_min}m trigger",
+                    "stage": "trigger",
+                    "direction": bias,
+                    "low": trigger_zone["low"],
+                    "high": trigger_zone["high"],
+                    "trigger": trigger_level,
+                    "why": (
+                        f"{timeframe_min}m {bias.upper()} stays valid only "
+                        f"{'above' if bias == 'long' else 'below'} {trigger_level:.2f}."
+                    ),
+                }
+            )
+        if reversal_zone:
+            guide_zones.append(
+                {
+                    "label": f"{timeframe_min}m reversal watch",
+                    "stage": "reversal",
+                    "direction": reversal_side,
+                    "low": reversal_zone["low"],
+                    "high": reversal_zone["high"],
+                    "trigger": trigger_level,
+                    "why": reversal_note,
+                }
+            )
 
         return {
             "timeframe": f"{timeframe_min}m",
@@ -1008,8 +1057,11 @@ class SignalEngine:
             "continuation_zone": continuation_zone,
             "reversal_zone": reversal_zone,
             "continuation_note": continuation_note,
+            "prediction_note": prediction_note,
             "reversal_note": reversal_note,
             "trigger_level": trigger_level,
+            "trigger_zone": trigger_zone,
+            "guide_zones": guide_zones,
         }
 
     def _pick_directional_zone(
@@ -1084,6 +1136,48 @@ class SignalEngine:
             "valid": False,
             "invalidation": round(current_price, 2),
             "message": "No continuation edge right now. Wait for 5m and 15m to align.",
+        }
+
+    def _build_prediction_summary(
+        self,
+        overall_bias: str,
+        guide_5m: dict,
+        guide_15m: dict,
+        *,
+        current_price: float,
+    ) -> dict:
+        if overall_bias in {"short", "neutral_to_short"}:
+            primary = guide_5m if guide_5m["bias"] == "short" else guide_15m
+            return {
+                "side": "short",
+                "watch_low": primary.get("continuation_zone", {}).get("low", round(current_price, 2)),
+                "watch_high": primary.get("continuation_zone", {}).get("high", round(current_price, 2)),
+                "trigger": primary.get("trigger_level", round(current_price, 2)),
+                "message": (
+                    f"Predicted SHORT = wait for pop into {float(primary.get('continuation_zone', {}).get('low', current_price)):.2f}-"
+                    f"{float(primary.get('continuation_zone', {}).get('high', current_price)):.2f} and rejection back "
+                    f"below {float(primary.get('trigger_level', current_price)):.2f}."
+                ),
+            }
+        if overall_bias in {"long", "neutral_to_long"}:
+            primary = guide_5m if guide_5m["bias"] == "long" else guide_15m
+            return {
+                "side": "long",
+                "watch_low": primary.get("continuation_zone", {}).get("low", round(current_price, 2)),
+                "watch_high": primary.get("continuation_zone", {}).get("high", round(current_price, 2)),
+                "trigger": primary.get("trigger_level", round(current_price, 2)),
+                "message": (
+                    f"Predicted LONG = wait for dip into {float(primary.get('continuation_zone', {}).get('low', current_price)):.2f}-"
+                    f"{float(primary.get('continuation_zone', {}).get('high', current_price)):.2f} and reclaim back "
+                    f"above {float(primary.get('trigger_level', current_price)):.2f}."
+                ),
+            }
+        return {
+            "side": "neutral",
+            "watch_low": round(current_price, 2),
+            "watch_high": round(current_price, 2),
+            "trigger": round(current_price, 2),
+            "message": "No clean predicted area yet. Wait for a structured move into value first.",
         }
 
     def _resample_for_guide(self, bars_df: pd.DataFrame, timeframe_min: int) -> pd.DataFrame:

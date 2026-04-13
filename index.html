@@ -1162,6 +1162,15 @@ function updateGuide(guide) {
       </div>
     `);
   }
+  if (guide.prediction) {
+    focusItems.push(`
+      <div class="guide-focus ${guide.prediction.side || 'neutral'}">
+        <div class="guide-focus-title">Predicted Area</div>
+        <div class="guide-focus-main">${guide.prediction.message || ''}</div>
+        <div class="guide-focus-sub">Watch ${Number(guide.prediction.watch_low || 0).toFixed(2)} - ${Number(guide.prediction.watch_high || 0).toFixed(2)} · trigger ${Number(guide.prediction.trigger || 0).toFixed(2)}</div>
+      </div>
+    `);
+  }
   if (guide.best_long_zone) {
     focusItems.push(`
       <div class="guide-focus long">
@@ -1201,10 +1210,10 @@ function updateGuide(guide) {
   zones.innerHTML = guide.zones.map(z => `
     <div class="guide-zone-item ${z.direction || 'neutral'}">
       <div class="guide-zone-top">
-        <div class="guide-zone-label">${z.label || 'Zone'}</div>
+        <div class="guide-zone-label">${z.label || 'Zone'}${z.stage ? ` · ${z.stage}` : ''}</div>
         <div class="guide-zone-range">${Number(z.low).toFixed(2)} - ${Number(z.high).toFixed(2)}</div>
       </div>
-      <div class="guide-zone-why">${z.why || ''}</div>
+      <div class="guide-zone-why">${z.why || ''}${z.trigger ? ` Trigger ${Number(z.trigger).toFixed(2)}.` : ''}</div>
     </div>
   `).join('');
   latestGuide = guide;
