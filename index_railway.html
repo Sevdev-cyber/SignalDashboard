@@ -1236,6 +1236,16 @@ function decisionTone(decision) {
   };
 }
 
+function assessmentTone(assessment) {
+  const state = String(assessment?.state || 'pending').toLowerCase();
+  if (state === 'good') return { bg: 'rgba(16,185,129,0.16)', fg: '#86efac', border: 'rgba(16,185,129,0.38)' };
+  if (state === 'working') return { bg: 'rgba(6,182,212,0.14)', fg: '#67e8f9', border: 'rgba(6,182,212,0.34)' };
+  if (state === 'watching') return { bg: 'rgba(245,158,11,0.14)', fg: '#fcd34d', border: 'rgba(245,158,11,0.34)' };
+  if (state === 'weak') return { bg: 'rgba(249,115,22,0.14)', fg: '#fdba74', border: 'rgba(249,115,22,0.34)' };
+  if (state === 'bad') return { bg: 'rgba(239,68,68,0.16)', fg: '#fca5a5', border: 'rgba(239,68,68,0.38)' };
+  return { bg: 'rgba(148,163,184,0.12)', fg: '#cbd5e1', border: 'rgba(148,163,184,0.28)' };
+}
+
 function formatDecisionZone(zone) {
   if (!zone) return null;
   const low = Number(zone.low);
@@ -1342,6 +1352,8 @@ function renderDecisionOverlay() {
   const x = Math.max(14, width - bandWidth - 16);
   const action = String(decision.action || 'wait').toUpperCase();
   const confidence = Number.isFinite(Number(decision.confidence)) ? Number(decision.confidence) : 0;
+  const assessment = decision.assessment || {};
+  const assTone = assessmentTone(assessment);
   const entry = formatDecisionZone(decision.entry_zone);
   const target = formatDecisionZone(decision.target_zone);
   const trigger = Number(decision.trigger_level);
@@ -1399,10 +1411,10 @@ function renderDecisionOverlay() {
 
   const title = svgEl('text', {
     x: x + 8, y: 16,
-    fill: tone.text, 'font-size': 10, 'font-family': 'JetBrains Mono, monospace',
+    fill: assTone.fg, 'font-size': 10, 'font-family': 'JetBrains Mono, monospace',
     'font-weight': 800, opacity: 0.98
   });
-  title.textContent = `${action} ${confidence}%`;
+  title.textContent = `${action} ${confidence}% · ${String(assessment.state || 'pending').toUpperCase()}`;
   predOverlay.appendChild(title);
 
   const meta = svgEl('text', {
@@ -1412,7 +1424,7 @@ function renderDecisionOverlay() {
   });
   const triggerText = Number.isFinite(trigger) ? `trig ${trigger.toFixed(2)}` : 'trig —';
   const invalidText = Number.isFinite(invalid) ? `inv ${invalid.toFixed(2)}` : 'inv —';
-  meta.textContent = `${triggerText} · ${invalidText}`;
+  meta.textContent = `${triggerText} · ${invalidText} · ${assessment.reason || 'pending'}`;
   predOverlay.appendChild(meta);
 
   if (support) {
@@ -1994,6 +2006,10 @@ function updateGuide(guide) {
   if (decision) {
     const actionClass = String(decision.action || decision.bias || 'wait').toLowerCase();
     const confidence = decision.confidence != null ? decision.confidence : 0;
+    const assessment = decision.assessment || {};
+    const assessmentClass = String(assessment.state || 'pending').toLowerCase();
+    const assessmentLabel = String(assessment.label || assessment.state || 'pending').toUpperCase();
+    const assessmentReason = assessment.reason || 'Waiting for enough data.';
     const trigger = decision.trigger_level != null ? Number(decision.trigger_level).toFixed(2) : '—';
     const invalid = decision.invalidation_level != null ? Number(decision.invalidation_level).toFixed(2) : '—';
     const entry = decision.entry_zone && decision.entry_zone.low != null && decision.entry_zone.high != null
@@ -2018,7 +2034,9 @@ function updateGuide(guide) {
         <span class="decision-chip">entry ${entry}</span>
         <span class="decision-chip">target ${target}</span>
         <span class="decision-chip ${confidence >= 75 ? 'good' : confidence >= 60 ? 'warn' : 'bad'}">support ${support}</span>
+        <span class="decision-chip" style="border-color:${assTone.border};background:${assTone.bg};color:${assTone.fg}">outcome ${assessmentLabel}</span>
       </div>
+      <div class="decision-summary" style="margin-top:6px;font-size:.72rem;opacity:.92">result: ${assessmentReason}</div>
     `;
     decisionConf.textContent = `conf ${confidence}%`;
   }

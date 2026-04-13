@@ -190,6 +190,7 @@ class TradeDecision:
     entry_zone: dict[str, Any] | None = None
     target_zone: dict[str, Any] | None = None
     supporting_signals: list[str] = field(default_factory=list)
+    assessment: dict[str, Any] = field(default_factory=dict)
     prompt: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -206,6 +207,7 @@ class TradeDecision:
             "entry_zone": self.entry_zone,
             "target_zone": self.target_zone,
             "supporting_signals": self.supporting_signals,
+            "assessment": self.assessment,
             "prompt": self.prompt,
         }
 
@@ -267,6 +269,16 @@ class MarketSnapshotBot:
             bias=bias,
             action=action,
         )
+        assessment = self._assess_decision(
+            snapshot,
+            bias=bias,
+            action=action,
+            trigger_level=trigger_level,
+            invalidation_level=invalidation_level,
+            entry_zone=entry_zone,
+            target_zone=target_zone,
+            confidence=confidence,
+        )
 
         if snapshot.vwap_state == "UNKNOWN" or snapshot.vwap <= 0:
             warnings.append("VWAP unavailable or not initialized.")
@@ -290,6 +302,7 @@ class MarketSnapshotBot:
             entry_zone=entry_zone,
             target_zone=target_zone,
             supporting_signals=self._supporting_signals(snapshot, bias),
+            assessment=assessment,
             prompt=prompt,
         )
 
@@ -515,6 +528,198 @@ class MarketSnapshotBot:
             summary = "Wait for a cleaner trigger. Current structure is not strong enough."
 
         return scenario, summary, trigger_level, invalidation_level, entry_zone, target_zone
+
+    def _assess_decision(
+        self,
+        s: MarketSnapshot,
+        *,
+        bias: str,
+        action: str,
+        trigger_level: float | None,
+        invalidation_level: float | None,
+        entry_zone: dict[str, Any] | None,
+        target_zone: dict[str, Any] | None,
+        confidence: int,
+    ) -> dict[str, Any]:
+        """Translate the current live snapshot into a coarse outcome label.
+
+        This is not a historical backtest score. It is a live quality read:
+        whether the market is validating the decision right now.
+        """
+        state = "pending"
+        score = max(0, min(100, confidence // 2))
+        reason = "Waiting for confirmation."
+        progress = 0.0
+        direction = bias if bias in {"long", "short"} else action if action in {"long", "short"} else "neutral"
+
+        entry = None
+        if isinstance(entry_zone, dict):
+            entry = self._zone_mid(entry_zone)
+        if not entry and trigger_level is not None:
+            entry = float(trigger_level)
+
+        target = self._zone_mid(target_zone) if isinstance(target_zone, dict) else None
+        invalid = float(invalidation_level) if invalidation_level is not None else None
+        price = float(s.price or 0.0)
+        atr = float(s.atr or 0.0)
+        atr = atr if atr > 0 else 1.0
+
+        if direction == "neutral" or action == "wait" or bias in {"rotation", "neutral"}:
+            if entry is not None:
+                dist = abs(price - entry) / atr
+                if dist <= 0.25:
+                    state = "watching"
+                    score = min(55, 40 + int((0.25 - dist) * 40))
+                    reason = "Price is near the decision zone, but no clean confirmation yet."
+                else:
+                    state = "pending"
+                    score = min(score, 45)
+                    reason = "No trade bias. Waiting for a cleaner setup."
+            return {
+                "state": state,
+                "label": state.upper(),
+                "score": score,
+                "reason": reason,
+                "progress": progress,
+                "direction": direction,
+            }
+
+        if direction == "long":
+            if invalid is not None and price <= invalid:
+                return {
+                    "state": "bad",
+                    "label": "BAD",
+                    "score": 5,
+                    "reason": "Price broke below invalidation.",
+                    "progress": -1.0,
+                    "direction": direction,
+                }
+            if target is not None:
+                if price >= target:
+                    return {
+                        "state": "good",
+                        "label": "GOOD",
+                        "score": 95,
+                        "reason": "Price reached the target area.",
+                        "progress": 1.0,
+                        "direction": direction,
+                    }
+                if entry is not None:
+                    span = max(atr * 0.25, target - entry)
+                    if span > 0:
+                        progress = (price - entry) / span
+                    if price >= entry:
+                        if progress >= 0.65:
+                            state = "good"
+                            score = min(92, 65 + int(progress * 25))
+                            reason = "Long is validating and moving toward target."
+                        elif progress >= 0.2:
+                            state = "working"
+                            score = min(80, 55 + int(progress * 20))
+                            reason = "Long is holding entry and moving in the right direction."
+                        else:
+                            state = "watching"
+                            score = min(65, 45 + int(max(progress, 0.0) * 25))
+                            reason = "Long is active, but progress is still early."
+                    elif price < entry - atr * 0.35:
+                        state = "weak"
+                        score = min(score, 42)
+                        reason = "Long idea has drifted away from the entry."
+                    return {
+                        "state": state,
+                        "label": state.upper(),
+                        "score": score,
+                        "reason": reason,
+                        "progress": round(float(progress), 3),
+                        "direction": direction,
+                    }
+            if entry is not None and price >= entry:
+                state = "working"
+                score = min(78, 52 + int(min(1.0, (price - entry) / atr) * 20))
+                reason = "Long is above entry and still alive."
+            else:
+                state = "watching"
+                score = min(score, 58)
+                reason = "Long setup is not confirmed yet."
+        else:
+            if invalid is not None and price >= invalid:
+                return {
+                    "state": "bad",
+                    "label": "BAD",
+                    "score": 5,
+                    "reason": "Price broke above invalidation.",
+                    "progress": -1.0,
+                    "direction": direction,
+                }
+            if target is not None:
+                if price <= target:
+                    return {
+                        "state": "good",
+                        "label": "GOOD",
+                        "score": 95,
+                        "reason": "Price reached the target area.",
+                        "progress": 1.0,
+                        "direction": direction,
+                    }
+                if entry is not None:
+                    span = max(atr * 0.25, entry - target)
+                    if span > 0:
+                        progress = (entry - price) / span
+                    if price <= entry:
+                        if progress >= 0.65:
+                            state = "good"
+                            score = min(92, 65 + int(progress * 25))
+                            reason = "Short is validating and moving toward target."
+                        elif progress >= 0.2:
+                            state = "working"
+                            score = min(80, 55 + int(progress * 20))
+                            reason = "Short is holding entry and moving in the right direction."
+                        else:
+                            state = "watching"
+                            score = min(65, 45 + int(max(progress, 0.0) * 25))
+                            reason = "Short is active, but progress is still early."
+                    elif price > entry + atr * 0.35:
+                        state = "weak"
+                        score = min(score, 42)
+                        reason = "Short idea has drifted away from the entry."
+                    return {
+                        "state": state,
+                        "label": state.upper(),
+                        "score": score,
+                        "reason": reason,
+                        "progress": round(float(progress), 3),
+                        "direction": direction,
+                    }
+            if entry is not None and price <= entry:
+                state = "working"
+                score = min(78, 52 + int(min(1.0, (entry - price) / atr) * 20))
+                reason = "Short is below entry and still alive."
+            else:
+                state = "watching"
+                score = min(score, 58)
+                reason = "Short setup is not confirmed yet."
+
+        if confidence >= 78 and state in {"working", "watching"}:
+            score = min(94, score + 8)
+        elif confidence <= 55 and state == "working":
+            score = max(45, score - 10)
+
+        return {
+            "state": state,
+            "label": state.upper(),
+            "score": int(max(0, min(100, score))),
+            "reason": reason,
+            "progress": round(float(progress), 3),
+            "direction": direction,
+        }
+
+    @staticmethod
+    def _zone_mid(zone: dict[str, Any]) -> float | None:
+        low = _num(zone.get("low"))
+        high = _num(zone.get("high"))
+        if low == 0 and high == 0:
+            return None
+        return round((low + high) / 2.0, 2)
 
     def _zone_from(
         self,
