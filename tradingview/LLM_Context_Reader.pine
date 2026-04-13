@@ -1,0 +1,286 @@
+//@version=6
+indicator("LLM Context Reader", overlay=true, max_labels_count=500, max_lines_count=500, max_boxes_count=500)
+
+// ═══════════════════════════════════════════════════════════════
+// LLM CONTEXT READER — PineScript indicator for AI analysis
+//
+// Shows on chart:
+//   1. Session opens/closes (NY, London, Asia) with vertical lines
+//   2. Weekly key levels (high, low, open, close, VWAP)
+//   3. Active FVGs (Fair Value Gaps) as colored boxes
+//   4. Previous day high/low/close
+//   5. Text summary panel readable by LLM from screenshot
+//
+// Usage:
+//   - Apply to MNQ/NQ 5-min or 1-min chart
+//   - Screenshot → paste to LLM → "analyze this chart"
+//   - Or use TradingView webhook → send data to bot
+// ═══════════════════════════════════════════════════════════════
+
+// ── INPUTS ──
+show_sessions    = input.bool(true, "Show Sessions (NY/London/Asia)")
+show_weekly      = input.bool(true, "Show Weekly Levels")
+show_daily       = input.bool(true, "Show Previous Day H/L/C")
+show_fvg         = input.bool(true, "Show Active FVGs")
+show_summary     = input.bool(true, "Show LLM Summary Panel")
+fvg_min_ticks    = input.int(2, "FVG Min Size (ticks)", minval=1)
+fvg_max_age_bars = input.int(200, "FVG Max Age (bars)", minval=10)
+weekly_lookback  = input.int(2, "Weekly Levels Lookback (weeks)", minval=1, maxval=4)
+
+// ── COLORS ──
+col_ny_open      = color.new(#3b82f6, 30)   // blue
+col_ny_close     = color.new(#8b5cf6, 30)   // purple
+col_london       = color.new(#f59e0b, 50)   // amber
+col_asia         = color.new(#06b6d4, 50)   // cyan
+col_weekly_high  = color.new(#ef4444, 30)   // red
+col_weekly_low   = color.new(#10b981, 30)   // green
+col_weekly_open  = color.new(#f59e0b, 40)   // amber
+col_prev_high    = color.new(#ef4444, 50)
+col_prev_low     = color.new(#10b981, 50)
+col_prev_close   = color.new(#94a3b8, 50)
+col_fvg_bull     = color.new(#10b981, 85)   // green transparent
+col_fvg_bear     = color.new(#ef4444, 85)   // red transparent
+
+// ═══════════════════════════════════════════════════════════════
+// 1. SESSION MARKERS
+// ═══════════════════════════════════════════════════════════════
+
+// Timezone: ET (Eastern Time)
+ny_open_hour   = 9
+ny_open_min    = 30
+ny_close_hour  = 16
+london_open_h  = 3   // 3:00 ET = 8:00 London
+asia_open_h    = 20  // 20:00 ET = 9:00 Tokyo next day
+
+is_new_bar = ta.change(time) != 0
+
+// Detect session boundaries
+cur_hour = hour(time, "America/New_York")
+cur_min  = minute(time, "America/New_York")
+prev_hour = hour(time[1], "America/New_York")
+
+ny_open_now    = cur_hour == ny_open_hour and cur_min >= ny_open_min and cur_min < ny_open_min + 5
+ny_close_now   = cur_hour == ny_close_hour and cur_min < 5
+london_open_now = cur_hour == london_open_h and prev_hour != london_open_h
+asia_open_now  = cur_hour == asia_open_h and prev_hour != asia_open_h
+
+if show_sessions
+    if ny_open_now
+        line.new(bar_index, high, bar_index, low, color=col_ny_open, width=2, style=line.style_solid, extend=extend.both)
+        label.new(bar_index, high, "NY OPEN", style=label.style_label_down, color=col_ny_open, textcolor=color.white, size=size.small)
+    if ny_close_now
+        line.new(bar_index, high, bar_index, low, color=col_ny_close, width=1, style=line.style_dashed, extend=extend.both)
+        label.new(bar_index, low, "NY CLOSE", style=label.style_label_up, color=col_ny_close, textcolor=color.white, size=size.small)
+    if london_open_now
+        label.new(bar_index, high, "LON", style=label.style_label_down, color=col_london, textcolor=color.white, size=size.tiny)
+    if asia_open_now
+        label.new(bar_index, low, "ASIA", style=label.style_label_up, color=col_asia, textcolor=color.white, size=size.tiny)
+
+// ═══════════════════════════════════════════════════════════════
+// 2. WEEKLY KEY LEVELS
+// ═══════════════════════════════════════════════════════════════
+
+// Weekly high/low/open/close
+[w_open, w_high, w_low, w_close] = request.security(syminfo.tickerid, "W", [open, high, low, close], lookahead=barmerge.lookahead_on)
+[pw_open, pw_high, pw_low, pw_close] = request.security(syminfo.tickerid, "W", [open[1], high[1], low[1], close[1]], lookahead=barmerge.lookahead_on)
+[pw2_high, pw2_low] = request.security(syminfo.tickerid, "W", [high[2], low[2]], lookahead=barmerge.lookahead_on)
+
+// Weekly VWAP
+w_vwap = ta.vwap(hlc3)
+
+if show_weekly
+    // Current week open
+    var line l_wo = na
+    if not na(w_open)
+        if na(l_wo)
+            l_wo := line.new(bar_index, w_open, bar_index + 1, w_open, color=col_weekly_open, width=1, style=line.style_dashed, extend=extend.right)
+        else
+            line.set_xy1(l_wo, bar_index, w_open)
+            line.set_xy2(l_wo, bar_index + 1, w_open)
+
+    // Previous week high (likely revisit target)
+    var line l_pwh = na
+    if not na(pw_high)
+        if na(l_pwh)
+            l_pwh := line.new(bar_index, pw_high, bar_index + 1, pw_high, color=col_weekly_high, width=2, style=line.style_dotted, extend=extend.right)
+        else
+            line.set_xy1(l_pwh, bar_index, pw_high)
+            line.set_xy2(l_pwh, bar_index + 1, pw_high)
+
+    // Previous week low
+    var line l_pwl = na
+    if not na(pw_low)
+        if na(l_pwl)
+            l_pwl := line.new(bar_index, pw_low, bar_index + 1, pw_low, color=col_weekly_low, width=2, style=line.style_dotted, extend=extend.right)
+        else
+            line.set_xy1(l_pwl, bar_index, pw_low)
+            line.set_xy2(l_pwl, bar_index + 1, pw_low)
+
+// ═══════════════════════════════════════════════════════════════
+// 3. PREVIOUS DAY HIGH / LOW / CLOSE
+// ═══════════════════════════════════════════════════════════════
+
+[d_high, d_low, d_close, d_open] = request.security(syminfo.tickerid, "D", [high[1], low[1], close[1], open], lookahead=barmerge.lookahead_on)
+
+if show_daily
+    var line l_pdh = na, var line l_pdl = na, var line l_pdc = na
+    if not na(d_high)
+        if na(l_pdh)
+            l_pdh := line.new(bar_index, d_high, bar_index+1, d_high, color=col_prev_high, width=1, style=line.style_dotted, extend=extend.right)
+            l_pdl := line.new(bar_index, d_low, bar_index+1, d_low, color=col_prev_low, width=1, style=line.style_dotted, extend=extend.right)
+            l_pdc := line.new(bar_index, d_close, bar_index+1, d_close, color=col_prev_close, width=1, style=line.style_dotted, extend=extend.right)
+        else
+            line.set_xy1(l_pdh, bar_index, d_high), line.set_xy2(l_pdh, bar_index+1, d_high)
+            line.set_xy1(l_pdl, bar_index, d_low),  line.set_xy2(l_pdl, bar_index+1, d_low)
+            line.set_xy1(l_pdc, bar_index, d_close), line.set_xy2(l_pdc, bar_index+1, d_close)
+
+// ═══════════════════════════════════════════════════════════════
+// 4. ACTIVE FVGs (Fair Value Gaps)
+// ═══════════════════════════════════════════════════════════════
+
+tick_size = syminfo.mintick
+fvg_min_size = fvg_min_ticks * tick_size
+
+// Track active FVGs
+var box[] fvg_boxes = array.new_box()
+var float[] fvg_tops = array.new_float()
+var float[] fvg_bots = array.new_float()
+var int[] fvg_dirs = array.new_int()  // 1=bull, -1=bear
+var int[] fvg_bars = array.new_int()
+
+if show_fvg and bar_index >= 2
+    // Bullish FVG: bar[2].high < bar[0].low (gap up)
+    bull_gap = low - high[2]
+    if bull_gap >= fvg_min_size
+        fvg_top = low
+        fvg_bot = high[2]
+        b = box.new(bar_index - 2, fvg_top, bar_index + 20, fvg_bot, bgcolor=col_fvg_bull, border_color=color.new(#10b981, 60), border_width=1)
+        array.push(fvg_boxes, b)
+        array.push(fvg_tops, fvg_top)
+        array.push(fvg_bots, fvg_bot)
+        array.push(fvg_dirs, 1)
+        array.push(fvg_bars, bar_index)
+
+    // Bearish FVG: bar[2].low > bar[0].high (gap down)
+    bear_gap = low[2] - high
+    if bear_gap >= fvg_min_size
+        fvg_top = low[2]
+        fvg_bot = high
+        b = box.new(bar_index - 2, fvg_top, bar_index + 20, fvg_bot, bgcolor=col_fvg_bear, border_color=color.new(#ef4444, 60), border_width=1)
+        array.push(fvg_boxes, b)
+        array.push(fvg_tops, fvg_top)
+        array.push(fvg_bots, fvg_bot)
+        array.push(fvg_dirs, -1)
+        array.push(fvg_bars, bar_index)
+
+    // Remove filled or expired FVGs
+    if array.size(fvg_boxes) > 0
+        for i = array.size(fvg_boxes) - 1 to 0
+            ftop = array.get(fvg_tops, i)
+            fbot = array.get(fvg_bots, i)
+            fbar = array.get(fvg_bars, i)
+            fdir = array.get(fvg_dirs, i)
+
+            // Filled: price entered the gap
+            filled = (fdir == 1 and low <= ftop and low >= fbot) or (fdir == -1 and high >= fbot and high <= ftop)
+            // Expired
+            expired = (bar_index - fbar) > fvg_max_age_bars
+
+            if filled or expired
+                box.delete(array.get(fvg_boxes, i))
+                array.remove(fvg_boxes, i)
+                array.remove(fvg_tops, i)
+                array.remove(fvg_bots, i)
+                array.remove(fvg_dirs, i)
+                array.remove(fvg_bars, i)
+            else
+                // Extend active FVG box to current bar
+                box.set_right(array.get(fvg_boxes, i), bar_index + 5)
+
+// ═══════════════════════════════════════════════════════════════
+// 5. LLM SUMMARY PANEL (readable from screenshot)
+// ═══════════════════════════════════════════════════════════════
+
+if show_summary and barstate.islast
+    // Gather context
+    atr14 = ta.atr(14)
+    ema20 = ta.ema(close, 20)
+    ema50 = ta.ema(close, 50)
+    rsi14 = ta.rsi(close, 14)
+
+    // Trend
+    trend = ema20 > ema50 ? "BULLISH" : ema20 < ema50 ? "BEARISH" : "NEUTRAL"
+    vwap_pos = close > w_vwap ? "ABOVE" : "BELOW"
+
+    // Distance to key levels
+    dist_pwh = not na(pw_high) ? math.abs(close - pw_high) : 0
+    dist_pwl = not na(pw_low)  ? math.abs(close - pw_low) : 0
+    dist_pdh = not na(d_high)  ? math.abs(close - d_high) : 0
+    dist_pdl = not na(d_low)   ? math.abs(close - d_low) : 0
+
+    // Active FVG count
+    bull_fvg_count = 0
+    bear_fvg_count = 0
+    nearest_fvg_dist = 9999.0
+    nearest_fvg_dir = ""
+    for i = 0 to math.max(0, array.size(fvg_dirs) - 1)
+        if i < array.size(fvg_dirs)
+            d = array.get(fvg_dirs, i)
+            mid = (array.get(fvg_tops, i) + array.get(fvg_bots, i)) / 2
+            dist = math.abs(close - mid)
+            if d == 1
+                bull_fvg_count += 1
+            else
+                bear_fvg_count += 1
+            if dist < nearest_fvg_dist
+                nearest_fvg_dist := dist
+                nearest_fvg_dir := d == 1 ? "BULL" : "BEAR"
+
+    // Session
+    in_ny = cur_hour >= 9 and cur_hour < 16
+    session_name = in_ny ? "NY RTH" : cur_hour >= 3 and cur_hour < 9 ? "LONDON" : "OVERNIGHT"
+
+    // Build summary text
+    summary = "═══ LLM CONTEXT ═══\n"
+    summary += str.tostring(syminfo.ticker) + " | " + timeframe.period + "\n"
+    summary += "Price: " + str.tostring(close, "#.##") + "\n"
+    summary += "Trend: " + trend + " | VWAP: " + vwap_pos + "\n"
+    summary += "EMA20: " + str.tostring(ema20, "#.##") + " | EMA50: " + str.tostring(ema50, "#.##") + "\n"
+    summary += "ATR14: " + str.tostring(atr14, "#.##") + " | RSI: " + str.tostring(rsi14, "#.#") + "\n"
+    summary += "Session: " + session_name + "\n"
+    summary += "───────────────────\n"
+    summary += "PW High: " + str.tostring(pw_high, "#.##") + " (" + str.tostring(dist_pwh, "#.#") + " away)\n"
+    summary += "PW Low:  " + str.tostring(pw_low, "#.##") + " (" + str.tostring(dist_pwl, "#.#") + " away)\n"
+    summary += "PD High: " + str.tostring(d_high, "#.##") + " (" + str.tostring(dist_pdh, "#.#") + " away)\n"
+    summary += "PD Low:  " + str.tostring(d_low, "#.##") + " (" + str.tostring(dist_pdl, "#.#") + " away)\n"
+    summary += "───────────────────\n"
+    summary += "FVGs: " + str.tostring(bull_fvg_count) + " bull, " + str.tostring(bear_fvg_count) + " bear\n"
+    if nearest_fvg_dist < 9999
+        summary += "Nearest: " + nearest_fvg_dir + " @ " + str.tostring(nearest_fvg_dist, "#.#") + " pts\n"
+    summary += "═══════════════════"
+
+    label.new(bar_index + 3, high, summary,
+         style=label.style_label_left,
+         color=color.new(#1a1f35, 10),
+         textcolor=color.new(#e2e8f0, 0),
+         textalign=text.align_left,
+         size=size.normal)
+
+// ═══════════════════════════════════════════════════════════════
+// 6. ALERTS (for webhook → bot integration)
+// ═══════════════════════════════════════════════════════════════
+
+// FVG touch alert
+fvg_touch = false
+if array.size(fvg_tops) > 0
+    for i = 0 to math.max(0, array.size(fvg_tops) - 1)
+        if i < array.size(fvg_tops)
+            ftop = array.get(fvg_tops, i)
+            fbot = array.get(fvg_bots, i)
+            if low <= ftop and high >= fbot
+                fvg_touch := true
+                break
+
+alertcondition(fvg_touch, "FVG Touch", "Price touching active FVG zone")
+alertcondition(ny_open_now, "NY Open", "New York session opened")
+alertcondition(ta.cross(close, ema20), "EMA20 Cross", "Price crossed EMA20")
