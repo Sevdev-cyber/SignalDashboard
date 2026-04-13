@@ -45,6 +45,7 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg-primary);color
 .badge.ema-NEUTRAL{background:rgba(100,116,139,.1);border-color:var(--text-muted);color:var(--text-muted)}
 .badge.vwap-ABOVE{color:var(--long);border-color:var(--long);background:var(--long-bg)}
 .badge.vwap-BELOW{color:var(--short);border-color:var(--short);background:var(--short-bg)}
+.badge.vwap-NEAR{background:rgba(100,116,139,.1);border-color:var(--text-muted);color:var(--text-muted)}
 .badge.time{background:rgba(6,182,212,.1);border-color:var(--accent-cyan);color:var(--accent-cyan)}
 .badge.day{background:rgba(139,92,246,.1);border-color:var(--accent-purple);color:var(--accent-purple)}
 
@@ -227,6 +228,18 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg-primary);color
 .guide-card-line{font-size:.72rem;color:var(--text-secondary);margin-bottom:4px}
 .guide-card-line strong{color:var(--text-primary)}
 .guide-card-note{font-size:.68rem;line-height:1.4;color:var(--text-muted)}
+.decision-box{background:var(--bg-card);border-radius:var(--radius);padding:14px;border:1px solid var(--border);margin-bottom:10px}
+.decision-head{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:6px}
+.decision-action{font-size:.78rem;font-weight:800;text-transform:uppercase;letter-spacing:.5px;color:var(--gold)}
+.decision-action.long{color:var(--long)}
+.decision-action.short{color:var(--short)}
+.decision-action.rotation,.decision-action.wait,.decision-action.unavailable{color:var(--text-muted)}
+.decision-summary{font-size:.76rem;line-height:1.45;color:var(--text-secondary)}
+.decision-meta{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+.decision-chip{font-size:.64rem;font-weight:700;text-transform:uppercase;letter-spacing:.4px;padding:3px 7px;border-radius:999px;border:1px solid rgba(255,255,255,.08);background:rgba(255,255,255,.03);color:var(--text-secondary)}
+.decision-chip.good{border-color:rgba(16,185,129,.35);background:rgba(16,185,129,.08);color:#86efac}
+.decision-chip.warn{border-color:rgba(245,158,11,.35);background:rgba(245,158,11,.08);color:#fcd34d}
+.decision-chip.bad{border-color:rgba(239,68,68,.35);background:rgba(239,68,68,.08);color:#fca5a5}
 .guide-zone-list{display:flex;flex-direction:column;gap:8px}
 .guide-zone-item{padding:9px 10px;border-radius:var(--radius-sm);border:1px solid rgba(255,255,255,.06);background:rgba(255,255,255,.03)}
 .guide-zone-item.long,.guide-zone-item.neutral_to_long{border-color:rgba(16,185,129,.25)}
@@ -393,6 +406,13 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg-primary);color
       <div class="section-title">🧭 Trader Guide</div>
       <div class="guide-overall" id="guideOverall">
         <div class="guide-summary">Ładowanie kontekstu 5m / 15m…</div>
+      </div>
+      <div class="decision-box" id="decisionBox">
+        <div class="decision-head">
+          <div class="decision-action wait">WAIT</div>
+          <div class="guide-conf" id="decisionConf">conf 0%</div>
+        </div>
+        <div class="decision-summary">Bot decision waiting for snapshot…</div>
       </div>
       <div class="guide-grid" id="guideGrid">
         <div class="guide-card"><div class="guide-card-note">No 5m guide yet</div></div>
@@ -792,7 +812,16 @@ function updateState(s) {
     updateChartTick(s);
   }
   txt('statAtr', s.atr?.toFixed(1) || '—');
-  txt('statVwap', s.vwap?.toFixed(2) || '—');
+  if (s.vwap != null) {
+    const vwapDist = s.vwap_dist != null ? s.vwap_dist : null;
+    const vwapDistAtr = s.vwap_dist_atr != null ? s.vwap_dist_atr : null;
+    const distText = vwapDist != null
+      ? ` (${vwapDist >= 0 ? '+' : ''}${vwapDist.toFixed(1)}${vwapDistAtr != null ? ` / ${vwapDistAtr >= 0 ? '+' : ''}${vwapDistAtr.toFixed(2)} ATR` : ''})`
+      : '';
+    txt('statVwap', `${s.vwap.toFixed(2)}${distText}`);
+  } else {
+    txt('statVwap', '—');
+  }
   txt('statEma20', s.ema20?.toFixed(2) || '—');
   txt('statEma50', s.ema50?.toFixed(2) || '—');
   const de = $('statDelta');
@@ -806,7 +835,12 @@ function updateState(s) {
   const b = $('headerBadges'); b.innerHTML = '';
   if (s.regime) b.appendChild(mk('span', `badge regime-${s.regime}`, s.regime.replace('_',' ')));
   if (s.ema_stack) b.appendChild(mk('span', `badge ema-${s.ema_stack}`, `EMA ${s.ema_stack}`));
-  if (s.vwap_pos) b.appendChild(mk('span', `badge vwap-${s.vwap_pos}`, `VWAP ${s.vwap_pos}`));
+  if (s.vwap_state && s.vwap_state !== 'UNKNOWN') {
+    const vwapClass = s.vwap_state === 'NEAR' ? 'vwap-NEAR' : `vwap-${s.vwap_pos || 'ABOVE'}`;
+    b.appendChild(mk('span', `badge ${vwapClass}`, `VWAP ${s.vwap_state.replace('_', ' ')}`));
+  } else if (s.vwap_pos && s.vwap_pos !== 'NEUTRAL') {
+    b.appendChild(mk('span', `badge vwap-${s.vwap_pos}`, `VWAP ${s.vwap_pos}`));
+  }
   if (s.time_label) b.appendChild(mk('span', 'badge time', s.time_label));
   if (s.day_label) b.appendChild(mk('span', 'badge day', s.day_label));
 
@@ -1085,7 +1119,10 @@ function updateIndicators(s) {
     s.vol_ratio > 1.5 ? 'hot' : s.vol_ratio > 1.2 ? 'warn' : s.vol_ratio < 0.7 ? 'bear' : '');
 
   // VWAP dist
-  setInd('indVwapDist', s.vwap_dist !== undefined ? (s.vwap_dist >= 0 ? '+' : '') + s.vwap_dist.toFixed(1) : '—',
+  setInd('indVwapDist',
+    s.vwap_dist != null
+      ? `${s.vwap_dist >= 0 ? '+' : ''}${s.vwap_dist.toFixed(1)} (${s.vwap_dist_atr != null ? (s.vwap_dist_atr >= 0 ? '+' : '') + s.vwap_dist_atr.toFixed(2) + ' ATR' : '—'})`
+      : '—',
     s.vwap_dist > 0 ? 'bull' : s.vwap_dist < 0 ? 'bear' : '');
 
   // Bar range
@@ -1102,14 +1139,17 @@ function updateIndicators(s) {
 
 function updateGuide(guide) {
   const overall = $('guideOverall');
+  const decisionBox = $('decisionBox');
+  const decisionConf = $('decisionConf');
   const grid = $('guideGrid');
   const focus = $('guideFocus');
   const l2 = $('guideL2');
   const zones = $('guideZones');
-  if (!overall || !grid || !focus || !l2 || !zones) return;
+  if (!overall || !grid || !focus || !l2 || !zones || !decisionBox || !decisionConf) return;
   latestGuide = guide || null;
   if (!guide) {
     overall.innerHTML = '<div class="guide-summary">Brak guide jeszcze.</div>';
+    decisionBox.innerHTML = '<div class="decision-head"><div class="decision-action wait">WAIT</div><div class="guide-conf" id="decisionConf">conf 0%</div></div><div class="decision-summary">Bot decision waiting for snapshot…</div>';
     grid.innerHTML = '<div class="guide-card"><div class="guide-card-note">No 5m guide yet</div></div><div class="guide-card"><div class="guide-card-note">No 15m guide yet</div></div>';
     focus.innerHTML = '<div class="guide-empty">Waiting for continuation / invalidation…</div>';
     l2.innerHTML = '<div class="guide-l2-sub">Waiting for live bid/ask reaction…</div>';
@@ -1125,6 +1165,39 @@ function updateGuide(guide) {
   });
   guide.display_overall_bias = overallStable.bias || guide.overall_bias || 'neutral';
   guide.display_confidence = overallStable.confidence || guide.confidence || 0;
+
+  const decision = guide.market_decision || null;
+  if (decision) {
+    const actionClass = String(decision.action || decision.bias || 'wait').toLowerCase();
+    const confidence = decision.confidence != null ? decision.confidence : 0;
+    const trigger = decision.trigger_level != null ? Number(decision.trigger_level).toFixed(2) : '—';
+    const invalid = decision.invalidation_level != null ? Number(decision.invalidation_level).toFixed(2) : '—';
+    const entry = decision.entry_zone && decision.entry_zone.low != null && decision.entry_zone.high != null
+      ? `${Number(decision.entry_zone.low).toFixed(2)}-${Number(decision.entry_zone.high).toFixed(2)}`
+      : '—';
+    const target = decision.target_zone && decision.target_zone.low != null && decision.target_zone.high != null
+      ? `${Number(decision.target_zone.low).toFixed(2)}-${Number(decision.target_zone.high).toFixed(2)}`
+      : '—';
+    const support = Array.isArray(decision.supporting_signals) && decision.supporting_signals.length
+      ? decision.supporting_signals.slice(0, 4).join(' · ')
+      : 'none';
+    decisionBox.innerHTML = `
+      <div class="decision-head">
+        <div class="decision-action ${actionClass}">${decision.action || 'wait'}</div>
+        <div class="guide-conf">conf ${confidence}%</div>
+      </div>
+      <div class="decision-summary">${decision.summary || 'No decision summary.'}</div>
+      <div class="decision-meta">
+        <span class="decision-chip ${decision.bias === 'long' || decision.bias === 'short' ? 'good' : 'warn'}">bias ${prettyBias(decision.bias || 'neutral')}</span>
+        <span class="decision-chip">trigger ${trigger}</span>
+        <span class="decision-chip">invalid ${invalid}</span>
+        <span class="decision-chip">entry ${entry}</span>
+        <span class="decision-chip">target ${target}</span>
+        <span class="decision-chip ${confidence >= 75 ? 'good' : confidence >= 60 ? 'warn' : 'bad'}">support ${support}</span>
+      </div>
+    `;
+    decisionConf.textContent = `conf ${confidence}%`;
+  }
 
   const l2Guide = guide.l2 ? { ...guide.l2 } : null;
   if (l2Guide) {

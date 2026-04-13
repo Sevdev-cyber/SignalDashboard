@@ -48,6 +48,7 @@ def load_nt8_ticks(filepath: str) -> pd.DataFrame:
     df['price'] = pd.to_numeric(df['price'], errors='coerce')
     df['volume'] = pd.to_numeric(df['volume'], errors='coerce')
     df.dropna(subset=['price'], inplace=True)
+    df = df[df['price'] > 0]
     
     df.sort_values("timestamp", inplace=True)
     df.reset_index(drop=True, inplace=True)

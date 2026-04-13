@@ -733,8 +733,24 @@ class SignalEngine:
             ema_stack = "NEUTRAL"
 
         # Price vs VWAP
-        vwap_pos = "ABOVE" if current_price > vwap else "BELOW"
+        # Keep the raw VWAP price, but also expose deviation from the mean in
+        # points and ATR units so the dashboard can show a meaningful context.
         vwap_dist = round(current_price - vwap, 2) if vwap > 0 else 0
+        vwap_dist_atr = round(vwap_dist / atr, 2) if vwap > 0 and atr > 0 else 0.0
+        if vwap > 0:
+            if vwap_dist_atr >= 1.5:
+                vwap_state = "EXTENDED_ABOVE"
+            elif vwap_dist_atr >= 0.35:
+                vwap_state = "ABOVE"
+            elif vwap_dist_atr <= -1.5:
+                vwap_state = "EXTENDED_BELOW"
+            elif vwap_dist_atr <= -0.35:
+                vwap_state = "BELOW"
+            else:
+                vwap_state = "NEAR"
+        else:
+            vwap_state = "UNKNOWN"
+        vwap_pos = "ABOVE" if vwap > 0 and vwap_dist >= 0 else "BELOW" if vwap > 0 else "NEUTRAL"
 
         # Volume relative to avg
         if "volume" in bars_df.columns and len(bars_df) > 20:
@@ -786,6 +802,8 @@ class SignalEngine:
             "vwap": round(vwap, 2),
             "vwap_pos": vwap_pos,
             "vwap_dist": vwap_dist,
+            "vwap_dist_atr": vwap_dist_atr,
+            "vwap_state": vwap_state,
             "ema20": round(ema20, 2),
             "ema50": round(ema50, 2),
             "ema100": round(ema100, 2),

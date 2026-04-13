@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 import compat  # noqa: F401 — patches dataclass for Python 3.9 (before hsb)
 from signal_engine import SignalEngine
 from bar_builder import get_target_tf_min
+from market_snapshot_bot import MarketSnapshotBot
 
 LOG_FMT = "%(asctime)s [%(name)-14s] %(levelname)-5s  %(message)s"
 log = logging.getLogger("signal_dash")
@@ -71,6 +72,7 @@ class SignalDashboardServer:
         self.bar_tf_min = get_target_tf_min()
 
         self.engine = SignalEngine()
+        self.snapshot_bot = MarketSnapshotBot()
         self.bars_df = pd.DataFrame()
         self.current_price = 0.0
         self.bar_count = 0
@@ -92,6 +94,7 @@ class SignalDashboardServer:
         self._latest_ghost_signals: list[dict] = []
         self._latest_engine_debug: dict = {}
         self._latest_zones: dict = {}
+        self._latest_market_decision: dict = {}
         self._recent_ticks = deque(maxlen=1200)
         self._l2_display_state = {
             "bias": "neutral",
@@ -111,6 +114,43 @@ class SignalDashboardServer:
     def _safe_json(self, data: dict) -> str:
         """Serialize to JSON, replacing NaN/Infinity with null."""
         return json.dumps(data, allow_nan=True, default=self._json_fallback).replace('NaN', 'null').replace('Infinity', 'null').replace('-Infinity', 'null')
+
+    def _build_market_decision(
+        self,
+        state: dict,
+        signals_payload: list[dict],
+        zones: dict,
+        ghost_signals: list[dict],
+    ) -> dict:
+        """Create a structural decision object from the current market snapshot."""
+        try:
+            snapshot_payload = {
+                "state": state,
+                "signals": signals_payload,
+                "zones": zones,
+                "ghost_signals": ghost_signals,
+            }
+            decision = self.snapshot_bot.analyze(snapshot_payload)
+            decision_dict = decision.to_dict()
+            self._latest_market_decision = decision_dict
+            return decision_dict
+        except Exception as e:
+            log.debug("snapshot decision error: %s", e)
+            return {
+                "action": "unavailable",
+                "bias": "unknown",
+                "confidence": 0,
+                "scenario": "error",
+                "summary": f"snapshot decision unavailable: {e}",
+                "reasons": [],
+                "warnings": [str(e)],
+                "trigger_level": None,
+                "invalidation_level": None,
+                "entry_zone": None,
+                "target_zone": None,
+                "supporting_signals": [],
+                "prompt": "",
+            }
 
     @staticmethod
     def _json_fallback(obj):
@@ -323,11 +363,14 @@ class SignalDashboardServer:
             self._session_cvd = int(float(last.get("cum_delta", self._session_cvd)))
 
             self.current_price = float(last["close"])
-            log.info("%dMIN BAR %d | C=%.2f | ATR=%.1f | Δ=%+d (buy=%.0f sell=%.0f) | CVD=%+d | VWAP=%.2f",
+            vwap_dist = float(last["close"]) - float(last.get("vwap", last["close"]))
+            vwap_dist_atr = vwap_dist / float(last.get("atr", 0) or 1.0)
+            log.info("%dMIN BAR %d | C=%.2f | ATR=%.1f | Δ=%+d (buy=%.0f sell=%.0f) | CVD=%+d | VWAP=%.2f (%+.2f / %.2f ATR)",
                      self.bar_tf_min, self.bar_count, self.current_price,
                      float(last.get("atr", 0)), int(completed["delta"]),
                      completed.get("buy_volume", 0), completed.get("sell_volume", 0),
-                     self._session_cvd, float(last.get("vwap", self.current_price)))
+                     self._session_cvd, float(last.get("vwap", self.current_price)),
+                     vwap_dist, vwap_dist_atr)
 
             now = time.time()
             if not hasattr(self, '_last_full_broadcast'):
@@ -411,13 +454,17 @@ class SignalDashboardServer:
 
     def _evaluate_and_broadcast(self):
         """Run signal engine and broadcast results."""
-        new_signals = self.engine.evaluate(
-            self.bars_df,
-            bar_delta_pct=self._bar_delta_pct,
-            current_price=self.current_price,
-        )
-        ghost_signals = self.engine.get_ghost_signals() if hasattr(self.engine, "get_ghost_signals") else []
-        engine_debug = self.engine.get_debug_info() if hasattr(self.engine, "get_debug_info") else {}
+        try:
+            new_signals = self.engine.evaluate(
+                self.bars_df,
+                bar_delta_pct=self._bar_delta_pct,
+                current_price=self.current_price,
+            )
+            ghost_signals = self.engine.get_ghost_signals() if hasattr(self.engine, "get_ghost_signals") else []
+            engine_debug = self.engine.get_debug_info() if hasattr(self.engine, "get_debug_info") else {}
+        except Exception:
+            log.exception("Signal evaluation crashed")
+            return
 
         now_ts = int(time.time() * 1000)
         price = self.current_price
@@ -544,6 +591,11 @@ class SignalDashboardServer:
         signals_payload.sort(key=lambda x: x["confidence_pct"], reverse=True)
         
         zones = self.engine.compute_weighted_zones(signals_payload)
+        market_decision = self._build_market_decision(state, signals_payload, zones, ghost_signals)
+        state["market_decision"] = market_decision
+        trader_guide = dict(state.get("trader_guide") or {})
+        trader_guide["market_decision"] = market_decision
+        state["trader_guide"] = trader_guide
 
         self._latest_state = state
         self._latest_signals = signals_payload
@@ -580,6 +632,7 @@ class SignalDashboardServer:
             "state": state,
             "signals": signals_payload,
             "ghost_signals": ghost_signals,
+            "market_decision": market_decision,
             "resolved": self.resolved_signals,
             "zones": zones,
             "history": self.engine.get_history(),
@@ -615,6 +668,11 @@ class SignalDashboardServer:
         signals_payload = list(self.active_signals.values())
         signals_payload.sort(key=lambda x: x["confidence_pct"], reverse=True)
         self._latest_signals = signals_payload
+        market_decision = self._build_market_decision(state, signals_payload, self._latest_zones, self._latest_ghost_signals)
+        state["market_decision"] = market_decision
+        trader_guide = dict(state.get("trader_guide") or {})
+        trader_guide["market_decision"] = market_decision
+        state["trader_guide"] = trader_guide
 
         # Local WS: full tick payload (signals, zones, etc.)
         local_payload = {
@@ -622,6 +680,7 @@ class SignalDashboardServer:
             "state": state,
             "signals": signals_payload[:15],
             "ghost_signals": self._latest_ghost_signals[:8],
+            "market_decision": market_decision,
             "resolved": self.resolved_signals[-10:],
             "zones": self._latest_zones,
         }
@@ -638,6 +697,7 @@ class SignalDashboardServer:
                     "state": state,
                     "signals": signals_payload[:10],
                     "ghost_signals": self._latest_ghost_signals[:4],
+                    "market_decision": market_decision,
                 }
                 asyncio.run_coroutine_threadsafe(self._relay_push(relay_tick), self.loop)
 

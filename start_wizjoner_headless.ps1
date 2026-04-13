@@ -38,22 +38,27 @@ if (Test-Path $PidPath) {
 
 New-Item -ItemType Directory -Force -Path $ProjectRoot | Out-Null
 
-$cmd = @(
-    "/c",
-    "cd /d $ProjectRoot",
-    "&& set DASHBOARD_BAR_TF_MIN=$BarTfMin",
-    "&& set SIGNAL_ENGINE_MODE=$EngineMode",
-    "&& set NT_ACCOUNT_NAME=$AccountName",
-    "&& $PythonExe $ServerScript --host $BindHost --port $TcpPort --ws-port $WsPort --relay-url $RelayUrl --relay-secret $RelaySecret --account $AccountName >> `"$LogPath`" 2>&1"
+$env:DASHBOARD_BAR_TF_MIN = $BarTfMin
+$env:SIGNAL_ENGINE_MODE = $EngineMode
+$env:NT_ACCOUNT_NAME = $AccountName
+
+$command = @(
+    "Set-Location '$ProjectRoot';",
+    "`$env:DASHBOARD_BAR_TF_MIN='$BarTfMin';",
+    "`$env:SIGNAL_ENGINE_MODE='$EngineMode';",
+    "`$env:NT_ACCOUNT_NAME='$AccountName';",
+    "& '$PythonExe' '$ServerScript' --host '$BindHost' --port $TcpPort --ws-port $WsPort --relay-url '$RelayUrl' --relay-secret '$RelaySecret' --account '$AccountName' *>> '$LogPath'"
 ) -join " "
 
-$proc = Start-Process -FilePath "cmd.exe" `
-    -ArgumentList $cmd `
+$proc = Start-Process -FilePath "powershell.exe" `
+    -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden", "-Command", $command) `
     -WorkingDirectory $ProjectRoot `
     -WindowStyle Hidden `
     -PassThru
 
 Set-Content -Path $PidPath -Value $proc.Id
+
+Start-Sleep -Seconds 2
 
 Write-Host "Wizjoner headless started. PID=$($proc.Id)"
 Write-Host "PID file: $PidPath"
