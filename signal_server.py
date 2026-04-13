@@ -70,7 +70,6 @@ class SignalDashboardServer:
         self._bar_delta_raw = 0        # buy_vol - sell_vol (Bookmap style)
         self._session_cvd = 0          # session cumulative delta
         self._bar_trade_value = 0.0    # sum(price * vol) for tick-level VWAP
-        self._warmup_done = False      # prevent re-processing warmup ticks on reconnect
 
         # WebSocket clients
         self._ws_clients: set = set()
@@ -235,16 +234,18 @@ class SignalDashboardServer:
             # Always update bars (reconnect may have newer data)
             self.bars_df = warmup_bars_to_df(adapter.warmup_bars)
 
-            # Apply real tick-based delta ONLY on first warmup in this session
-            if not self._warmup_done and adapter.warmup_ticks:
+            # Always apply tick-based flow on warmup if ticks are available.
+            if adapter.warmup_ticks:
                 log.info("🎯 Processing %d warmup ticks for real delta/CVD/VWAP...", len(adapter.warmup_ticks))
                 self.bars_df = apply_tick_deltas(self.bars_df, adapter.warmup_ticks)
                 log.info("✅ Tick-based delta applied to %d bars", len(self.bars_df))
-                self._warmup_done = True
-            elif self._warmup_done:
-                log.info("⏭️ Skipping tick warmup (already processed this session)")
+            else:
+                log.info("⏭️ No warmup ticks available; using bar-derived flow fallback")
 
             self.bar_count = len(self.bars_df)
+            self._bar_buy_vol = 0
+            self._bar_sell_vol = 0
+            self._bar_trade_value = 0.0
             if not self.bars_df.empty:
                 self.current_price = float(self.bars_df.iloc[-1]["close"])
                 if "cum_delta" in self.bars_df.columns:
@@ -271,7 +272,8 @@ class SignalDashboardServer:
 
             # Accumulate sub-target bars into target candles
             completed = bar_accum.add_bar(bar, true_delta=true_delta,
-                                          buy_vol=float(buy_v), sell_vol=float(sell_v))
+                                          buy_vol=float(buy_v), sell_vol=float(sell_v),
+                                          trade_value=float(trade_value))
 
             # Reset tick accumulators for next input bar
             self._bar_buy_vol = 0
@@ -287,20 +289,19 @@ class SignalDashboardServer:
                 return
 
             # ── target timeframe bar completed ──
-            self._session_cvd += int(completed["delta"])
-
             new_row = completed  # already a dict with all fields
             df = pd.concat([self.bars_df, pd.DataFrame([new_row])], ignore_index=True)
             self.bars_df = enrich_bars(df)
             self.bar_count += 1
             last = self.bars_df.iloc[-1]
+            self._session_cvd = int(float(last.get("cum_delta", self._session_cvd)))
 
             self.current_price = float(last["close"])
-            log.info("%dMIN BAR %d | C=%.2f | ATR=%.1f | Δ=%+d (buy=%.0f sell=%.0f) | CVD=%+d",
+            log.info("%dMIN BAR %d | C=%.2f | ATR=%.1f | Δ=%+d (buy=%.0f sell=%.0f) | CVD=%+d | VWAP=%.2f",
                      self.bar_tf_min, self.bar_count, self.current_price,
                      float(last.get("atr", 0)), int(completed["delta"]),
                      completed.get("buy_volume", 0), completed.get("sell_volume", 0),
-                     self._session_cvd)
+                     self._session_cvd, float(last.get("vwap", self.current_price)))
 
             now = time.time()
             if not hasattr(self, '_last_full_broadcast'):

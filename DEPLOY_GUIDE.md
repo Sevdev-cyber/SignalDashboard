@@ -129,6 +129,12 @@ C:\SignalDashboard\                    ← Kopia z git/scp
 ├── hsb/...                            ← Cały pakiet HSB
 └── server.log                         ← Logi Wizjonera
 
+C:\NewSignal\                          ← WYMAGANE przez signal_engine.py
+├── final_signal_engine.py             ← aktywny FinalSignalEngine
+├── newsignal_core.py                  ← core families + guide zones
+├── v2\signal_engine_v2.py
+└── *.txt / *.csv                      ← audyty i wyniki testów
+
 C:\Users\Administrator\Desktop\
 ├── Wizjoner.bat                       ← Uruchamia Wizjonera
 ├── 1_START_Scalper_Playback.bat       ← NT8 playback
@@ -156,7 +162,7 @@ ssh Administrator@66.42.117.137
 ### Deploy na VPS (cały projekt)
 ```bash
 cd "/Users/sacredforest/Trading Setup"
-tar czf /tmp/w.tar.gz SignalDashboard/
+tar czf /tmp/w.tar.gz SignalDashboard/ NewSignal/
 scp /tmp/w.tar.gz Administrator@66.42.117.137:"C:/"
 ssh Administrator@66.42.117.137 "cd /d C:\ && tar xzf w.tar.gz && del w.tar.gz"
 rm /tmp/w.tar.gz
@@ -168,6 +174,8 @@ echo "DEPLOYED"
 scp SignalDashboard/signal_server.py Administrator@66.42.117.137:"C:/SignalDashboard/"
 scp SignalDashboard/signal_engine.py Administrator@66.42.117.137:"C:/SignalDashboard/"
 scp SignalDashboard/bar_builder.py Administrator@66.42.117.137:"C:/SignalDashboard/"
+scp NewSignal/final_signal_engine.py Administrator@66.42.117.137:"C:/NewSignal/"
+scp NewSignal/newsignal_core.py Administrator@66.42.117.137:"C:/NewSignal/"
 ```
 
 ### Deploy na Railway (git push)
@@ -257,6 +265,19 @@ set SIGNAL_ENGINE_MODE=final_mtf_v3
 python signal_server.py --port 5557 --ws-port 8082 --relay-url https://web-production-3ff3f.up.railway.app/push --relay-secret SacredForestSignal123
 pause
 ```
+
+## Ostatnia weryfikacja
+
+- Feed wejściowy do Wizjonera: `1m`, `On each tick`, z live tickami bid/ask z TickStreamerMirror.
+- Flow stack poprawiony: `delta`, `buy_volume`, `sell_volume`, `cum_delta/cvd`, `vwap` liczone z prawdziwych ticków gdy są dostępne; fallback z OHLC używany tylko gdy ticków brak.
+- Session reset poprawiony do granicy CME `18:00 ET`.
+- Entry execution poprawione o mikro-potwierdzenie zamiast natychmiastowego ślepego wejścia dla wybranych family.
+- Smoke test micro-exec:
+  - baseline 8 sesji: `825` setupów, `66.3%` TP hit, median `MAE 14.75`
+  - true micro executor 8 sesji: `18` wykonań, `83.3%` TP hit, `77.8%` clean TP, median `MAE 8.38`
+- Pliki z audytem:
+  - `NewSignal/entry_execution_audit_2026-04-13.txt`
+  - `NewSignal/flow_calculation_audit_2026-04-13.txt`
 
 ---
 

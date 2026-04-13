@@ -16,6 +16,40 @@ import numpy as np
 import pandas as pd
 
 log = logging.getLogger("jajcus.bar_builder")
+CME_TZ = "America/New_York"
+
+
+def normalize_cme_datetimes(values):
+    """Normalize timestamps to naive America/New_York wall-clock time.
+
+    Naive inputs are assumed to already be in the intended session timezone.
+    Timezone-aware inputs are converted explicitly to ET before dropping tz.
+    """
+    dt = pd.to_datetime(values, errors="coerce")
+    if isinstance(dt, pd.Series):
+        if getattr(dt.dt, "tz", None) is not None:
+            return dt.dt.tz_convert(CME_TZ).dt.tz_localize(None)
+        return dt
+    if isinstance(dt, pd.DatetimeIndex):
+        if dt.tz is not None:
+            return dt.tz_convert(CME_TZ).tz_localize(None)
+        return dt
+    if isinstance(dt, pd.Timestamp):
+        if dt.tzinfo is not None:
+            return dt.tz_convert(CME_TZ).tz_localize(None)
+        return dt
+    return dt
+
+
+def cme_session_keys(values):
+    """Return CME session IDs using the 18:00 ET boundary."""
+    dt = normalize_cme_datetimes(values)
+    shifted = dt - pd.Timedelta(hours=18)
+    if isinstance(shifted, pd.Series):
+        return shifted.dt.date
+    if isinstance(shifted, pd.DatetimeIndex):
+        return pd.Series(shifted.date, index=getattr(values, "index", None))
+    return shifted.date()
 
 
 def _session_groups(frame: pd.DataFrame):
@@ -27,21 +61,40 @@ def _session_groups(frame: pd.DataFrame):
     """
     if "datetime" not in frame.columns:
         return None
-    dt = pd.to_datetime(frame["datetime"])
-    # Shift by 6 hours so 18:00 → midnight boundary → date change
-    shifted = dt - pd.Timedelta(hours=18)
-    return shifted.dt.date
+    return cme_session_keys(frame["datetime"])
 
 
 def enrich_bars(df: pd.DataFrame) -> pd.DataFrame:
     """Add technical indicators to OHLCV DataFrame."""
     frame = df.copy()
+    if "datetime" in frame.columns:
+        frame["datetime"] = normalize_cme_datetimes(frame["datetime"])
+        frame = frame.sort_values("datetime").reset_index(drop=True)
 
-    # Delta: estimate from OHLCV for bars that lack tick data (delta==0)
-    # Per-bar estimation — doesn't skip bars that already have real tick delta
     if "delta" not in frame.columns:
         frame["delta"] = 0.0
-    mask = frame["delta"] == 0
+    frame["delta"] = pd.to_numeric(frame["delta"], errors="coerce").fillna(0.0)
+
+    if "has_real_tick_delta" not in frame.columns:
+        inferred_real_delta = pd.Series(False, index=frame.index, dtype=bool)
+        if {"buy_volume", "sell_volume", "volume", "delta"}.issubset(frame.columns):
+            vol = pd.to_numeric(frame["volume"], errors="coerce").fillna(0.0)
+            buy_existing = pd.to_numeric(frame["buy_volume"], errors="coerce").fillna(0.0)
+            sell_existing = pd.to_numeric(frame["sell_volume"], errors="coerce").fillna(0.0)
+            delta_existing = pd.to_numeric(frame["delta"], errors="coerce").fillna(0.0)
+            tol = np.maximum(1.0, vol * 0.01)
+            inferred_real_delta = (
+                (buy_existing + sell_existing) > 0
+            ) & (
+                ((buy_existing + sell_existing) - vol).abs() <= tol
+            ) & (
+                ((buy_existing - sell_existing) - delta_existing).abs() <= tol
+            )
+        frame["has_real_tick_delta"] = inferred_real_delta
+    frame["has_real_tick_delta"] = frame["has_real_tick_delta"].fillna(False).astype(bool)
+
+    # Delta: estimate only for bars that truly lack tick-derived flow.
+    mask = ~frame["has_real_tick_delta"]
     if mask.any():
         bar_range = frame["high"] - frame["low"]
         close_pos = (frame["close"] - frame["low"]) / bar_range.replace(0, np.nan)
@@ -49,10 +102,30 @@ def enrich_bars(df: pd.DataFrame) -> pd.DataFrame:
         delta_pct = (close_pos * 2 - 1)
         frame.loc[mask, "delta"] = (delta_pct[mask] * frame["volume"][mask]).fillna(0)
 
+    vol = pd.to_numeric(frame.get("volume", pd.Series(0, index=frame.index)), errors="coerce").fillna(0.0)
+    delta = pd.to_numeric(frame["delta"], errors="coerce").fillna(0.0)
+    inferred_buy = ((vol + delta) / 2.0).clip(lower=0.0)
+    inferred_buy = np.minimum(inferred_buy, vol)
+    inferred_sell = (vol - inferred_buy).clip(lower=0.0)
+
     if "buy_volume" not in frame.columns:
-        frame["buy_volume"] = frame.get("volume", pd.Series(0, index=frame.index)) * 0.5
+        frame["buy_volume"] = inferred_buy
+    else:
+        buy_existing = pd.to_numeric(frame["buy_volume"], errors="coerce")
+        frame["buy_volume"] = buy_existing.where(frame["has_real_tick_delta"], inferred_buy).fillna(inferred_buy)
     if "sell_volume" not in frame.columns:
-        frame["sell_volume"] = frame.get("volume", pd.Series(0, index=frame.index)) * 0.5
+        frame["sell_volume"] = inferred_sell
+    else:
+        sell_existing = pd.to_numeric(frame["sell_volume"], errors="coerce")
+        frame["sell_volume"] = sell_existing.where(frame["has_real_tick_delta"], inferred_sell).fillna(inferred_sell)
+
+    typical_price = (frame["high"] + frame["low"] + frame["close"]) / 3
+    fallback_trade_value = typical_price * vol
+    if "trade_value" not in frame.columns:
+        frame["trade_value"] = fallback_trade_value
+    else:
+        trade_value = pd.to_numeric(frame["trade_value"], errors="coerce")
+        frame["trade_value"] = trade_value.where(frame["has_real_tick_delta"], fallback_trade_value).fillna(fallback_trade_value)
 
     # ATR(14)
     prev_close = frame["close"].shift(1)
@@ -71,17 +144,15 @@ def enrich_bars(df: pd.DataFrame) -> pd.DataFrame:
         frame["cum_delta"] = frame.groupby(session)["delta"].cumsum()
     else:
         frame["cum_delta"] = frame["delta"].cumsum()
+    frame["cvd"] = frame["cum_delta"]
 
-    # VWAP — session-based, typical price method
-    typical_price = (frame["high"] + frame["low"] + frame["close"]) / 3
-    trade_value = typical_price * frame["volume"]
-
+    # VWAP — session-based, prefer real tick trade value when available.
     if session is not None:
-        cum_tv = trade_value.groupby(session).cumsum()
-        cum_vol = frame["volume"].groupby(session).cumsum().replace(0, np.nan)
+        cum_tv = frame["trade_value"].groupby(session).cumsum()
+        cum_vol = vol.groupby(session).cumsum().replace(0, np.nan)
     else:
-        cum_tv = trade_value.cumsum()
-        cum_vol = frame["volume"].replace(0, np.nan).cumsum()
+        cum_tv = frame["trade_value"].cumsum()
+        cum_vol = vol.replace(0, np.nan).cumsum()
 
     frame["vwap"] = (cum_tv / cum_vol).ffill().fillna(frame["close"])
 
@@ -97,7 +168,7 @@ def enrich_bars(df: pd.DataFrame) -> pd.DataFrame:
     rs = gain / loss.replace(0.0, np.nan)
     frame["rsi"] = (100 - 100 / (1 + rs)).fillna(50.0)
 
-    frame["session"] = "jajcus_live"
+    frame["session"] = session.astype(str) if session is not None else "jajcus_live"
 
     return frame.reset_index(drop=True)
 
@@ -179,9 +250,9 @@ def apply_tick_deltas(bars_df: pd.DataFrame, warmup_ticks: list) -> pd.DataFrame
              bar_dt.iloc[0], bar_dt.iloc[-1], len(bar_dt))
     log.info("Tick time range: %s → %s (%d ticks)",
              tick_dt[0], tick_dt[-1], len(tick_dt))
-    tick_prices = np.array(tick_prices, dtype=np.float64)
     tick_sizes = np.array(tick_sizes, dtype=np.int64)
     tick_aggrs = np.array(tick_aggrs, dtype=np.int32)
+    tick_prices = np.array(tick_prices, dtype=np.float64)
 
     # Bar assignment: tick belongs to bar whose CLOSE time is the first one >= tick time
     # searchsorted(side='left') returns index of first bar_close >= tick_time
@@ -201,6 +272,8 @@ def apply_tick_deltas(bars_df: pd.DataFrame, warmup_ticks: list) -> pd.DataFrame
 
     bar_sell = np.zeros(len(frame), dtype=np.int64)
     np.add.at(bar_sell, bar_indices[sell_mask], tick_sizes[sell_mask])
+    bar_trade_value = np.zeros(len(frame), dtype=np.float64)
+    np.add.at(bar_trade_value, bar_indices, tick_prices * tick_sizes)
 
     # Apply real delta only to bars with tick data
     has_ticks = (bar_buy + bar_sell) > 0
@@ -209,6 +282,8 @@ def apply_tick_deltas(bars_df: pd.DataFrame, warmup_ticks: list) -> pd.DataFrame
     frame.loc[has_ticks, "delta"] = (bar_buy - bar_sell)[has_ticks].astype(float)
     frame.loc[has_ticks, "buy_volume"] = bar_buy[has_ticks].astype(float)
     frame.loc[has_ticks, "sell_volume"] = bar_sell[has_ticks].astype(float)
+    frame.loc[has_ticks, "trade_value"] = bar_trade_value[has_ticks]
+    frame.loc[has_ticks, "has_real_tick_delta"] = True
 
     # Distribution stats + sanity check
     unique_bars = np.unique(bar_indices)
@@ -283,6 +358,10 @@ def resample_to_5min(df: pd.DataFrame) -> pd.DataFrame:
         agg["buy_volume"] = "sum"
     if "sell_volume" in frame.columns:
         agg["sell_volume"] = "sum"
+    if "trade_value" in frame.columns:
+        agg["trade_value"] = "sum"
+    if "has_real_tick_delta" in frame.columns:
+        agg["has_real_tick_delta"] = "max"
 
     resampled = frame.resample(f"{TARGET_TF_MIN}min", label="right", closed="right").agg(agg)
     resampled = resampled.dropna(subset=["open"])  # drop empty periods
@@ -307,6 +386,8 @@ def warmup_bars_to_df(warmup_bars: list) -> pd.DataFrame:
             "close": b.close,
             "volume": b.volume,
             "delta": 0.0,
+            "trade_value": np.nan,
+            "has_real_tick_delta": False,
         })
 
     df = pd.DataFrame(records)
@@ -337,6 +418,7 @@ class BarAccumulator:
         self._pending_delta = 0.0
         self._pending_buy = 0.0
         self._pending_sell = 0.0
+        self._pending_trade_value = 0.0
         self._window_start = None
         self._input_count = 0
         self._detected_interval = None
@@ -349,7 +431,7 @@ class BarAccumulator:
         self._detected_interval = 0
 
     def add_bar(self, bar, true_delta: float = 0.0, buy_vol: float = 0.0,
-                sell_vol: float = 0.0) -> dict | None:
+                sell_vol: float = 0.0, trade_value: float = 0.0) -> dict | None:
         """Add a bar. Returns a completed target-TF bar dict, or None if still accumulating."""
         bar_dt = pd.to_datetime(bar.timestamp)
 
@@ -379,6 +461,8 @@ class BarAccumulator:
                 "delta": self._pending_delta,
                 "buy_volume": self._pending_buy,
                 "sell_volume": self._pending_sell,
+                "trade_value": self._pending_trade_value,
+                "has_real_tick_delta": (self._pending_buy + self._pending_sell) > 0,
             }
 
             # Reset for new window
@@ -392,6 +476,7 @@ class BarAccumulator:
             self._pending_delta = true_delta
             self._pending_buy = buy_vol
             self._pending_sell = sell_vol
+            self._pending_trade_value = trade_value
             self._input_count += 1
 
             log.debug("%dmin bar emitted: O=%.2f H=%.2f L=%.2f C=%.2f V=%.0f",
@@ -408,6 +493,7 @@ class BarAccumulator:
         self._pending_delta += true_delta
         self._pending_buy += buy_vol
         self._pending_sell += sell_vol
+        self._pending_trade_value += trade_value
         self._input_count += 1
         return None
 
@@ -427,6 +513,8 @@ def append_bar(bars_df: pd.DataFrame, bar, true_delta: float = 0.0,
         "close": bar.close,
         "volume": bar.volume,
         "delta": true_delta,
+        "trade_value": kwargs.get("trade_value", np.nan),
+        "has_real_tick_delta": bool(kwargs.get("has_real_tick_delta", False)),
     }
     df = pd.concat([bars_df, pd.DataFrame([new_row])], ignore_index=True)
     return enrich_bars(df)

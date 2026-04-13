@@ -446,10 +446,14 @@ let lastBarLow = 0;
 let chartBarTimes = new Set();
 let lastAtr = 20;
 var predOverlay = null;
+var sessionOverlay = null;
+var fvgOverlay = null;
 var guideChartHud = null;
 var latestGuide = null;
 var stableGuideState = {};
 var stableSignalBias = { bias: 'neutral', pct: 50, candidate: null, candidateCount: 0 };
+var chartSessionBlocks = [];
+var chartFvgs = [];
 
 function connect() {
   ws = new WebSocket(WS_URL);
@@ -527,6 +531,12 @@ function initChart() {
   predOverlay = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   predOverlay.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:5;overflow:visible';
   container.appendChild(predOverlay);
+  sessionOverlay = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  sessionOverlay.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:4;overflow:visible';
+  container.appendChild(sessionOverlay);
+  fvgOverlay = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  fvgOverlay.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;z-index:4;overflow:visible';
+  container.appendChild(fvgOverlay);
 
   guideChartHud = document.createElement('div');
   guideChartHud.style.cssText = 'position:absolute;top:12px;left:12px;max-width:360px;pointer-events:none;z-index:6;display:flex;flex-direction:column;gap:8px';
@@ -561,6 +571,10 @@ function updateChartHistory(bars) {
   
   try {
       candleSeries.setData(unique);
+      chartSessionBlocks = buildSessionBlocks(unique);
+      chartFvgs = detectFvgZones(unique);
+      renderSessionOverlay();
+      renderFvgOverlay();
 
       const cvdData = unique.filter(b => b.cum_delta != null).map(b => ({
           time: b.time,
@@ -838,6 +852,181 @@ function renderPredSVG() {
   });
 }
 
+function renderSessionOverlay() {
+  if (!sessionOverlay || !chart || !candleSeries) return;
+  sessionOverlay.innerHTML = '';
+  const width = sessionOverlay.clientWidth || sessionOverlay.getBoundingClientRect().width || 0;
+  const height = sessionOverlay.clientHeight || sessionOverlay.getBoundingClientRect().height || 0;
+  if (!width || !height || !chartSessionBlocks.length) return;
+  chartSessionBlocks.forEach(block => {
+    const x1 = chart.timeScale().timeToCoordinate(block.startTime);
+    const x2 = chart.timeScale().timeToCoordinate(block.endTime);
+    if (x1 == null || x2 == null) return;
+    const rawX = Math.min(x1, x2);
+    const rawW = Math.max(1, Math.abs(x2 - x1));
+    const x = Math.max(0, rawX);
+    const w = Math.min(width - x, rawW + Math.max(0, -rawX));
+    if (w <= 2) return;
+    const fill = block.kind === 'asia' ? 'rgba(59,130,246,0.06)' : block.kind === 'london' ? 'rgba(245,158,11,0.06)' : 'rgba(16,185,129,0.06)';
+    const stroke = block.kind === 'asia' ? 'rgba(59,130,246,0.18)' : block.kind === 'london' ? 'rgba(245,158,11,0.18)' : 'rgba(16,185,129,0.18)';
+    sessionOverlay.appendChild(svgEl('rect', {
+      x, y: 0, width: w, height,
+      fill, stroke, 'stroke-width': 1
+    }));
+    const label = svgEl('text', {
+      x: x + 6, y: 14,
+      fill: stroke, 'font-size': 10, 'font-family': 'JetBrains Mono, monospace',
+      'font-weight': 700, opacity: 0.95
+    });
+    label.textContent = `${block.label} close ${block.close?.toFixed(2) ?? '—'}`;
+    sessionOverlay.appendChild(label);
+    if (block.high != null) {
+      const yHigh = candleSeries.priceToCoordinate(block.high);
+      if (yHigh != null) {
+        sessionOverlay.appendChild(svgEl('line', {
+          x1: x, y1: yHigh, x2: x + w, y2: yHigh,
+          stroke, 'stroke-width': 1, 'stroke-dasharray': '5,3', opacity: 0.8
+        }));
+      }
+    }
+    if (block.low != null) {
+      const yLow = candleSeries.priceToCoordinate(block.low);
+      if (yLow != null) {
+        sessionOverlay.appendChild(svgEl('line', {
+          x1: x, y1: yLow, x2: x + w, y2: yLow,
+          stroke, 'stroke-width': 1, 'stroke-dasharray': '5,3', opacity: 0.8
+        }));
+      }
+    }
+  });
+}
+
+function renderFvgOverlay() {
+  if (!fvgOverlay || !chart || !candleSeries) return;
+  fvgOverlay.innerHTML = '';
+  const width = fvgOverlay.clientWidth || fvgOverlay.getBoundingClientRect().width || 0;
+  const height = fvgOverlay.clientHeight || fvgOverlay.getBoundingClientRect().height || 0;
+  if (!width || !height || !chartFvgs.length) return;
+  chartFvgs.slice(-24).forEach(fvg => {
+    const x1 = chart.timeScale().timeToCoordinate(fvg.startTime);
+    const x2 = chart.timeScale().timeToCoordinate(fvg.endTime);
+    const y1 = candleSeries.priceToCoordinate(fvg.low);
+    const y2 = candleSeries.priceToCoordinate(fvg.high);
+    if (x1 == null || x2 == null || y1 == null || y2 == null) return;
+    const rawX = Math.min(x1, x2);
+    const rawW = Math.max(12, Math.abs(x2 - x1));
+    const rawY = Math.min(y1, y2);
+    const rawH = Math.max(10, Math.abs(y2 - y1));
+    const x = Math.max(0, rawX);
+    const y = Math.max(0, rawY);
+    const w = Math.min(width - x, rawW + Math.max(0, -rawX));
+    const h = Math.min(height - y, rawH + Math.max(0, -rawY));
+    if (w <= 4 || h <= 4) return;
+    const tone = fvg.direction === 'bull' ? '16,185,129' : '239,68,68';
+    fvgOverlay.appendChild(svgEl('rect', {
+      x, y, width: w, height: h,
+      fill: `rgba(${tone},0.10)`,
+      stroke: `rgba(${tone},0.50)`,
+      'stroke-width': 1, rx: 5, ry: 5
+    }));
+    const tag = svgEl('text', {
+      x: x + 5, y: Math.max(12, y - 4),
+      fill: fvg.direction === 'bull' ? '#86efac' : '#fca5a5',
+      'font-size': 9, 'font-family': 'JetBrains Mono, monospace',
+      'font-weight': 700
+    });
+    tag.textContent = `${fvg.label} ${fvg.low.toFixed(2)}-${fvg.high.toFixed(2)}`;
+    fvgOverlay.appendChild(tag);
+  });
+}
+
+function getEtParts(unixSec) {
+  const dtf = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York',
+    hour12: false,
+    weekday: 'short',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+  const parts = Object.fromEntries(
+    dtf.formatToParts(new Date(unixSec * 1000)).map(p => [p.type, p.value])
+  );
+  return {
+    weekday: String(parts.weekday || ''),
+    minutes: Number(parts.hour || 0) * 60 + Number(parts.minute || 0),
+  };
+}
+
+function classifySessionEt(unixSec) {
+  const { weekday, minutes } = getEtParts(unixSec);
+  if (weekday === 'Sat') return null;
+  if (weekday === 'Sun' && minutes < 18 * 60) return null;
+  if (minutes >= 18 * 60 || minutes < 3 * 60) return { kind: 'asia', label: 'ASIA' };
+  if (minutes >= 3 * 60 && minutes < 9 * 60 + 30) return { kind: 'london', label: 'LONDON' };
+  if (minutes >= 9 * 60 + 30 && minutes < 16 * 60) return { kind: 'ny', label: 'NY' };
+  return null;
+}
+
+function buildSessionBlocks(bars) {
+  if (!bars || bars.length < 10) return [];
+  const blocks = [];
+  let current = null;
+  for (const bar of bars) {
+    const session = classifySessionEt(bar.time);
+    if (!session) {
+      current = null;
+      continue;
+    }
+    if (!current || current.kind !== session.kind || bar.time - current.lastTime > 7200) {
+      current = {
+        kind: session.kind,
+        label: session.label,
+        startTime: bar.time,
+        endTime: bar.time,
+        lastTime: bar.time,
+        high: bar.high,
+        low: bar.low,
+        close: bar.close,
+      };
+      blocks.push(current);
+    } else {
+      current.endTime = bar.time;
+      current.lastTime = bar.time;
+      current.high = Math.max(current.high, bar.high);
+      current.low = Math.min(current.low, bar.low);
+      current.close = bar.close;
+    }
+  }
+  return blocks;
+}
+
+function detectFvgZones(bars) {
+  if (!bars || bars.length < 5) return [];
+  const out = [];
+  for (let i = 2; i < bars.length; i++) {
+    const a = bars[i - 2];
+    const c = bars[i];
+    const minGap = 0.5;
+    if (c.low > a.high + minGap) {
+      const low = a.high;
+      const high = c.low;
+      const filled = bars.slice(i + 1).some(b => b.low <= low);
+      if (!filled) {
+        out.push({ direction: 'bull', low, high, startTime: a.time, endTime: bars[bars.length - 1].time, label: 'Bull FVG' });
+      }
+    }
+    if (c.high < a.low - minGap) {
+      const low = c.high;
+      const high = a.low;
+      const filled = bars.slice(i + 1).some(b => b.high >= high);
+      if (!filled) {
+        out.push({ direction: 'bear', low, high, startTime: a.time, endTime: bars[bars.length - 1].time, label: 'Bear FVG' });
+      }
+    }
+  }
+  return out;
+}
+
 function stabilizeBiasFlip(slot, rawBias, rawConf, options = {}) {
   const minFlipCount = options.minFlipCount ?? 2;
   const hardEdge = options.hardEdge ?? 15;
@@ -899,14 +1088,15 @@ function prettyBias(bias) {
 
 function renderGuideOverlay() {
   if (!predOverlay || !candleSeries || !latestGuide) return;
-  const zones = Array.isArray(latestGuide.zones) ? latestGuide.zones.slice(0, 5) : [];
+  const zones = Array.isArray(latestGuide.zones) ? latestGuide.zones.slice(0, 3) : [];
   if (!zones.length) return;
 
   const width = predOverlay.clientWidth || predOverlay.getBoundingClientRect().width || 0;
-  if (!width) return;
+  const height = predOverlay.clientHeight || predOverlay.getBoundingClientRect().height || 0;
+  if (!width || !height) return;
 
-  const x = width * 0.05;
-  const bandWidth = width * 0.72;
+  const bandWidth = Math.min(220, width * 0.26);
+  const x = Math.max(12, width - bandWidth - 18);
 
   zones.forEach((zone, idx) => {
     const low = Number(zone.low);
@@ -917,24 +1107,30 @@ function renderGuideOverlay() {
     if (yLow == null || yHigh == null) return;
 
     const top = Math.min(yLow, yHigh);
-    const height = Math.max(12, Math.abs(yLow - yHigh));
+    const bandHeight = Math.max(12, Math.abs(yLow - yHigh));
+    if (top > height || top + bandHeight < 0) return;
     const tone = biasTone(zone.direction);
     const fill = tone === 'long' ? 'rgba(16,185,129,0.10)' : tone === 'short' ? 'rgba(239,68,68,0.10)' : 'rgba(148,163,184,0.10)';
     const stroke = tone === 'long' ? 'rgba(16,185,129,0.55)' : tone === 'short' ? 'rgba(239,68,68,0.55)' : 'rgba(148,163,184,0.45)';
 
     predOverlay.appendChild(svgEl('rect', {
-      x, y: top, width: bandWidth, height,
+      x, y: top, width: bandWidth, height: bandHeight,
       rx: 6, ry: 6, fill, stroke, 'stroke-width': 1,
       opacity: idx < 2 ? 0.95 : 0.7
     }));
 
     predOverlay.appendChild(svgEl('line', {
-      x1: x, y1: top + height / 2, x2: x + bandWidth, y2: top + height / 2,
+      x1: x, y1: top + bandHeight / 2, x2: x + bandWidth, y2: top + bandHeight / 2,
       stroke, 'stroke-width': 1, 'stroke-dasharray': '6,4', opacity: 0.45
     }));
 
+    predOverlay.appendChild(svgEl('line', {
+      x1: x - 16, y1: top + bandHeight / 2, x2: x, y2: top + bandHeight / 2,
+      stroke, 'stroke-width': 1.2, opacity: 0.5
+    }));
+
     const label = svgEl('text', {
-      x: x + 8, y: Math.max(14, top - 6),
+      x: x + 8, y: Math.max(14, top + 12),
       fill: tone === 'long' ? '#86efac' : tone === 'short' ? '#fca5a5' : '#cbd5e1',
       'font-size': 10, 'font-family': 'JetBrains Mono, monospace',
       'font-weight': 700, opacity: 0.95
@@ -1594,17 +1790,17 @@ function updateZones(zones) {
           <div class="zone-lvl">
             <div class="zone-lvl-label">Entry</div>
             <div class="zone-lvl-price entry">${z.entry?.toFixed(2)}</div>
-            <div class="zone-lvl-range">${z.entry_min?.toFixed(0)}–${z.entry_max?.toFixed(0)}</div>
+            <div class="zone-lvl-range">${z.entry_min?.toFixed(2)}–${z.entry_max?.toFixed(2)}</div>
           </div>
           <div class="zone-lvl">
             <div class="zone-lvl-label">🎯 Target</div>
             <div class="zone-lvl-price tp">${z.tp1?.toFixed(2)}</div>
-            <div class="zone-lvl-range">${z.tp1_min?.toFixed(0)}–${z.tp1_max?.toFixed(0)}</div>
+            <div class="zone-lvl-range">${z.tp1_min?.toFixed(2)}–${z.tp1_max?.toFixed(2)}</div>
           </div>
           <div class="zone-lvl">
             <div class="zone-lvl-label">🚫 Stop</div>
             <div class="zone-lvl-price sl">${z.sl?.toFixed(2)}</div>
-            <div class="zone-lvl-range">${z.sl_min?.toFixed(0)}–${z.sl_max?.toFixed(0)}</div>
+            <div class="zone-lvl-range">${z.sl_min?.toFixed(2)}–${z.sl_max?.toFixed(2)}</div>
           </div>
         </div>
       </div>
