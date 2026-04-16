@@ -250,6 +250,10 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg-primary);color
 .guide-zone-item.trigger{background:linear-gradient(135deg,rgba(255,255,255,.03),rgba(16,185,129,.10))}
 .guide-zone-item.trigger.short{background:linear-gradient(135deg,rgba(255,255,255,.03),rgba(239,68,68,.10))}
 .guide-zone-item.reversal{background:linear-gradient(135deg,rgba(255,255,255,.03),rgba(168,85,247,.08))}
+.guide-zone-item.llm_prediction{background:linear-gradient(135deg,rgba(255,255,255,.03),rgba(14,165,233,.10));border-color:rgba(14,165,233,.24)}
+.guide-zone-item.llm_target{background:linear-gradient(135deg,rgba(255,255,255,.03),rgba(16,185,129,.10));border-color:rgba(16,185,129,.24)}
+.guide-zone-item.llm_invalidation{background:linear-gradient(135deg,rgba(255,255,255,.03),rgba(239,68,68,.10));border-color:rgba(239,68,68,.24)}
+.guide-zone-item.llm_level{background:linear-gradient(135deg,rgba(255,255,255,.03),rgba(245,158,11,.10));border-color:rgba(245,158,11,.24)}
 .guide-focus-list{display:flex;flex-direction:column;gap:8px;margin-bottom:10px}
 .guide-focus{padding:9px 10px;border-radius:var(--radius-sm);background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.06)}
 .guide-focus.long{border-color:rgba(16,185,129,.25)}
@@ -268,6 +272,10 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg-primary);color
 .guide-zone-stage.watch{color:#fcd34d;border-color:rgba(245,158,11,.35);background:rgba(245,158,11,.10)}
 .guide-zone-stage.trigger{color:#86efac;border-color:rgba(16,185,129,.35);background:rgba(16,185,129,.10)}
 .guide-zone-stage.reversal{color:#d8b4fe;border-color:rgba(168,85,247,.35);background:rgba(168,85,247,.10)}
+.guide-zone-stage.llm_prediction{color:#7dd3fc;border-color:rgba(14,165,233,.35);background:rgba(14,165,233,.10)}
+.guide-zone-stage.llm_target{color:#86efac;border-color:rgba(16,185,129,.35);background:rgba(16,185,129,.10)}
+.guide-zone-stage.llm_invalidation{color:#fca5a5;border-color:rgba(239,68,68,.35);background:rgba(239,68,68,.10)}
+.guide-zone-stage.llm_level{color:#fcd34d;border-color:rgba(245,158,11,.35);background:rgba(245,158,11,.10)}
 .guide-empty{font-size:.78rem;color:var(--text-muted);text-align:center;padding:8px}
 .guide-l2{padding:9px 10px;border-radius:var(--radius-sm);background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.06);margin-bottom:10px}
 .guide-l2-title{font-size:.7rem;text-transform:uppercase;color:var(--text-muted);margin-bottom:4px}
@@ -612,14 +620,48 @@ function assessmentTone(assessment) {
 
 function normalizeTraderGuide(guide) {
   if (!guide || typeof guide !== 'object') return null;
-  const tf5 = guide.tf_5m || guide.guide_5m || (Array.isArray(guide.timeframes) ? guide.timeframes[0] : null) || null;
+  
+  let tf5 = guide.tf_5m || guide.guide_5m || (Array.isArray(guide.timeframes) ? guide.timeframes[0] : null) || null;
   const tf15 = guide.tf_15m || guide.guide_15m || (Array.isArray(guide.timeframes) ? guide.timeframes[1] : null) || null;
+  
+  // HSB v11.5 - LLM Context hoisting!
+  const llm = guide.llm_context || null;
+  if (llm) {
+    if (!guide.overall_bias) guide.overall_bias = llm.bias || 'neutral';
+    if (!guide.confidence) guide.confidence = llm.confidence || 0;
+    if (!guide.summary) guide.summary = llm.summary || 'Wykryto sygnał LLM.';
+    
+    // Inject playbook into continuation/focus box
+    if (!guide.continuation && llm.playbook) {
+      guide.continuation = { side: llm.bias, message: llm.playbook, valid: true, invalidation: llm.invalidation_level || 0 };
+    }
+    // Inject trade plan into prediction box
+    if (!guide.prediction && llm.trade_plan) {
+      guide.prediction = { side: llm.bias, message: llm.trade_plan, trigger: 0, watch_low: 0, watch_high: 0 };
+    }
+    
+    // Formulate synthetic 5m TF block from LLM context so the big boxes don't stay empty
+    if (!tf5 && llm.bias) {
+      tf5 = {
+        timeframe: 'LLM 5m/15m',
+        bias: llm.bias,
+        trigger_level: '—',
+        reversal_risk: llm.warning ? 'high' : 'medium',
+        continuation_note: llm.alignment_summary || '',
+        reversal_note: llm.conflict_note || ''
+      };
+    }
+  }
+
   return {
     ...guide,
     tf_5m: tf5,
     tf_15m: tf15,
     guide_5m: tf5,
     guide_15m: tf15,
+    htf_audit: guide.htf_audit || null,
+    daily_context: guide.daily_context || null,
+    llm_context: llm,
     timeframes: Array.isArray(guide.timeframes) && guide.timeframes.length ? guide.timeframes : [tf5, tf15],
   };
 }
@@ -1293,7 +1335,10 @@ function updateGuide(guide) {
         <div class="guide-conf">conf ${normalized.display_confidence || normalized.confidence || 0}%</div>
       </div>
       <div class="guide-summary">${normalized.summary || 'No summary.'}</div>
-      <div class="guide-card-note" style="margin-top:6px">Structure = 5m/15m context. Flow = tick/L2 reaction and can wobble faster inside the same structure.</div>
+      ${normalized.htf_audit ? `<div class="guide-card-note" style="margin-top:6px">HTF: ${normalized.htf_audit.summary_short || normalized.htf_audit.summary || 'No HTF summary.'}</div>` : ''}
+      ${normalized.daily_context ? `<div class="guide-card-note" style="margin-top:6px">Daily audit${normalized.daily_context.source ? ` (${normalized.daily_context.source})` : ''}: ${normalized.daily_context.summary || 'No daily summary.'}</div>` : ''}
+      ${normalized.llm_context ? `<div class="guide-card-note" style="margin-top:6px">LLM ${normalized.llm_context.trigger_type || 'context'}${normalized.llm_context.source ? ` (${normalized.llm_context.source})` : ''}: ${normalized.llm_context.summary || 'No intraday LLM summary.'}</div>` : ''}
+      <div class="guide-card-note" style="margin-top:6px">Structure = 5m/15m execution context. HTF = 1H/4H/1D/1W/1M backdrop. Flow = tick/L2 reaction and can wobble faster inside the same structure.</div>
     `;
 
     const tfCards = [normalized.tf_5m, normalized.tf_15m].map(tf => {
