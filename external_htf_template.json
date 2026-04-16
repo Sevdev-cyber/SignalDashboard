@@ -1,0 +1,66 @@
+{
+  "source": "manual_or_external_htf_feed",
+  "history_note": "Loaded from external HTF cache with deeper history than relay bars.",
+  "summary": "Monthly and weekly structure loaded from external history.",
+  "weekly_context": "Describe weekly structure, important swing, imbalance, acceptance or rejection.",
+  "monthly_context": "Describe monthly structure, major swing or old session/month levels.",
+  "preferred_playbooks": [
+    "pullback_only_with_htf_alignment"
+  ],
+  "avoid_conditions": [
+    "avoid_fading_major_monthly_level_without_confirmation"
+  ],
+  "levels": [
+    {
+      "label": "Monthly major level",
+      "price": 0.0,
+      "direction": "neutral",
+      "why": "Old monthly/session level from deeper history."
+    }
+  ],
+  "active_fvgs": [],
+  "timeframes": {
+    "tf_1d": {
+      "timeframe": "1D",
+      "bias": "neutral",
+      "strength": 0,
+      "history_bars": 0,
+      "history_ok": true,
+      "trigger_level": 0.0,
+      "invalidation_level": 0.0,
+      "range_high": 0.0,
+      "range_low": 0.0,
+      "continuation_note": "",
+      "reversal_note": "",
+      "active_fvgs": []
+    },
+    "tf_1w": {
+      "timeframe": "1W",
+      "bias": "neutral",
+      "strength": 0,
+      "history_bars": 0,
+      "history_ok": true,
+      "trigger_level": 0.0,
+      "invalidation_level": 0.0,
+      "range_high": 0.0,
+      "range_low": 0.0,
+      "continuation_note": "",
+      "reversal_note": "",
+      "active_fvgs": []
+    },
+    "tf_1mo": {
+      "timeframe": "1M",
+      "bias": "neutral",
+      "strength": 0,
+      "history_bars": 0,
+      "history_ok": true,
+      "trigger_level": 0.0,
+      "invalidation_level": 0.0,
+      "range_high": 0.0,
+      "range_low": 0.0,
+      "continuation_note": "",
+      "reversal_note": "",
+      "active_fvgs": []
+    }
+  }
+}

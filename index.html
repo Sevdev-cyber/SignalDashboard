@@ -208,6 +208,14 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg-primary);color
 .ind-val.hot{color:#f97316}
 
 /* ─── Trader Guide ─── */
+.agent-log-box{background:var(--bg-card);border-radius:var(--radius);padding:14px;border:1px solid var(--border)}
+.agent-log-scroll{max-height:400px;overflow-y:auto;font-family:'Fira Code','Courier New',monospace;font-size:11px;line-height:1.5;background:#0d1117;border-radius:6px;padding:10px;color:#c9d1d9}
+.agent-log-scroll::-webkit-scrollbar{width:6px}.agent-log-scroll::-webkit-scrollbar-thumb{background:#30363d;border-radius:3px}
+.agent-log-line{white-space:pre-wrap;word-break:break-word;padding:1px 0}
+.agent-log-line.event{color:#d29922}.agent-log-line.zone{color:#db6d28}.agent-log-line.micro{color:#58a6ff}
+.agent-log-line.trade{color:#3fb950;font-weight:600}.agent-log-line.sl{color:#f85149;font-weight:600}
+.agent-log-line.tp{color:#3fb950;font-weight:600}.agent-log-line.header{color:#8b949e;font-weight:700}
+.agent-log-line.detail{color:#484f58}.agent-log-empty{color:#484f58;font-style:italic;text-align:center;padding:20px}
 .guide-box{background:var(--bg-card);border-radius:var(--radius);padding:14px;border:1px solid var(--border)}
 .guide-overall{padding:10px 12px;border-radius:var(--radius-sm);background:rgba(255,255,255,.03);border:1px solid rgba(255,255,255,.05);margin-bottom:10px}
 .guide-overall-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
@@ -441,6 +449,14 @@ body{font-family:'Inter',system-ui,sans-serif;background:var(--bg-primary);color
       </div>
     </div>
 
+    <!-- Agent Event Log -->
+    <div class="agent-log-box" id="agentLogBox">
+      <div class="section-title">🤖 Agent Event Log</div>
+      <div class="agent-log-scroll" id="agentLogScroll">
+        <div class="agent-log-empty">Waiting for chained agent events…</div>
+      </div>
+    </div>
+
     <!-- Weighted Zones -->
     <div class="zones-box compact-hide" id="zonesBox">
       <div class="section-title">🎯 Weighted Zones</div>
@@ -517,9 +533,32 @@ function connect() {
         updateIndicators(d.state);
         updateGuide(d.state?.trader_guide);
         updateZones(d.zones);
+        if (d.chained_agent_log) renderAgentLog(d.chained_agent_log);
       }
     } catch(err) {}
   };
+}
+
+// ═══ AGENT EVENT LOG ═══
+function renderAgentLog(lines) {
+  const el = document.getElementById('agentLogScroll');
+  if (!el || !Array.isArray(lines) || lines.length === 0) return;
+  const wasAtBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
+  let html = '';
+  for (const line of lines) {
+    let cls = '';
+    if (line.includes('EVENT TRIGGERED') || line.includes('🚨')) cls = 'event';
+    else if (line.includes('ZONE ENTERED') || line.includes('⚠️')) cls = 'zone';
+    else if (line.includes('MICRO ALERT') || line.includes('🎯')) cls = 'micro';
+    else if (line.includes('TRADE EXECUTED') || line.includes('🚀')) cls = 'trade';
+    else if (line.includes('STOP LOSS') || line.includes('🔴')) cls = 'sl';
+    else if (line.includes('TAKE PROFIT') || line.includes('🟢')) cls = 'tp';
+    else if (line.includes('===')) cls = 'header';
+    else if (line.startsWith('   ->')) cls = 'detail';
+    html += `<div class="agent-log-line ${cls}">${line.replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>`;
+  }
+  el.innerHTML = html;
+  if (wasAtBottom) el.scrollTop = el.scrollHeight;
 }
 
 // ═══ CHART ═══

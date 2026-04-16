@@ -37,6 +37,7 @@ from daily_htf_context import DailyHTFContextService
 from intraday_llm_context import IntradayLLMContextService
 from market_snapshot_bot import MarketSnapshotBot
 from signal_execution_bot import ExecutionConfig, SignalExecutionBot
+from live_chained_agent import LiveChainedAgent
 
 load_project_env()
 
@@ -82,6 +83,7 @@ class SignalDashboardServer:
         self.intraday_llm_service = IntradayLLMContextService()
         self.snapshot_bot = MarketSnapshotBot()
         self.execution_selector = SignalExecutionBot(ExecutionConfig())
+        self.chained_agent = LiveChainedAgent()
         self.bars_df = pd.DataFrame()
         self.current_price = 0.0
         self.bar_count = 0
@@ -633,6 +635,32 @@ class SignalDashboardServer:
                      self._session_cvd, float(last.get("vwap", self.current_price)),
                      vwap_dist, vwap_dist_atr)
 
+            # Feed bar to live chained agent (non-blocking, in executor)
+            try:
+                dt_val = last.get("datetime")
+                bar_date = ""
+                time_str = "00:00"
+                if dt_val is not None and str(dt_val) != "NaT":
+                    if hasattr(dt_val, "strftime"):
+                        bar_date = dt_val.strftime("%Y-%m-%d")
+                        time_str = dt_val.strftime("%H:%M")
+                    else:
+                        s = str(dt_val)
+                        bar_date = s[:10] if len(s) >= 10 else ""
+                        time_str = s[11:16] if len(s) >= 16 else "00:00"
+                agent_bar = {
+                    "open": float(last["open"]),
+                    "high": float(last["high"]),
+                    "low": float(last["low"]),
+                    "close": float(last["close"]),
+                    "volume": float(last.get("volume", 0)),
+                    "datetime": time_str,
+                    "date": bar_date,
+                }
+                self.executor.submit(self.chained_agent.on_bar, agent_bar)
+            except Exception as e:
+                log.debug("Chained agent bar feed error: %s", e)
+
             now = time.time()
             if not hasattr(self, '_last_full_broadcast'):
                 self._last_full_broadcast = 0
@@ -1045,6 +1073,7 @@ class SignalDashboardServer:
                     "market_decision": market_decision,
                     "decision_ledger": decision_ledger,
                     "decision_stats": state["decision_stats"],
+                    "chained_agent_log": self.chained_agent.get_event_log(),
                 }
                 asyncio.run_coroutine_threadsafe(self._relay_push(relay_tick), self.loop)
 
