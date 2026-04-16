@@ -143,8 +143,34 @@ C:\Users\Administrator\Desktop\
 C:\SignalDashboard\
 ├── start_wizjoner_headless.ps1        ← Start bez okna + log do server.log
 ├── stop_wizjoner_headless.ps1         ← Stop po PID
-└── tail_wizjoner_log.ps1              ← Tail logu przez PowerShell
+├── tail_wizjoner_log.ps1              ← Tail logu przez PowerShell
+├── .env                               ← Lokalny plik sekretów / konfiguracji LLM
+└── .env.example                       ← Szablon konfiguracji
 ```
+
+### Klucz API LLM na VPS
+
+Najwygodniej trzymać klucz tutaj:
+
+```powershell
+C:\SignalDashboard\.env
+```
+
+Przykład:
+
+```env
+OPENAI_API_KEY=tu_wklej_swoj_klucz
+SNAPSHOT_LLM_PROVIDER=openai
+SNAPSHOT_LLM_MODEL=gpt-4.1-mini
+SIGNAL_DAILY_CONTEXT_USE_LLM=1
+SIGNAL_INTRADAY_LLM_USE_API=1
+```
+
+Ważne:
+
+- plik `.env` jest ignorowany przez git
+- `signal_server.py`, `llm_context_worker.py`, `build_live_mnq_context_package.py` i `market_snapshot_runner.py` ładują `.env` automatycznie
+- po zmianie `.env` po prostu zrestartuj backend / worker
 
 ### Wybór konta NT8
 

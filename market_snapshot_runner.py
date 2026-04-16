@@ -15,8 +15,11 @@ import sys
 import time
 from pathlib import Path
 
+from env_bootstrap import load_project_env
 from market_snapshot_bot import MarketSnapshotBot
 from market_snapshot_llm import MarketSnapshotLLMClient
+
+load_project_env()
 
 
 def _load_snapshot(path: str | None) -> dict:

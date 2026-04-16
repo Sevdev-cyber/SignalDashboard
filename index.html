@@ -625,7 +625,8 @@ function normalizeTraderGuide(guide) {
   const tf15 = guide.tf_15m || guide.guide_15m || (Array.isArray(guide.timeframes) ? guide.timeframes[1] : null) || null;
   
   // HSB v11.5 - LLM Context hoisting!
-  const llm = guide.llm_context || null;
+  let llm = guide.llm_context || null;
+  if (llm && llm.intraday_llm_context) llm = llm.intraday_llm_context;
   if (llm) {
     if (!guide.overall_bias) guide.overall_bias = llm.bias || 'neutral';
     if (!guide.confidence) guide.confidence = llm.confidence || 0;

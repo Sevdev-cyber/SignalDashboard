@@ -13,6 +13,10 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from env_bootstrap import load_project_env
+
+load_project_env()
+
 log = logging.getLogger(__name__)
 
 

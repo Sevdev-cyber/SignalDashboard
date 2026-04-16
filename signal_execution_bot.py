@@ -19,7 +19,19 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
+import sys
 from typing import Any
+
+import pandas as pd
+
+
+ROOT_DIR = Path(__file__).resolve().parent.parent
+NEWSIGNAL_DIR = ROOT_DIR / "NewSignal"
+if str(NEWSIGNAL_DIR) not in sys.path:
+    sys.path.insert(0, str(NEWSIGNAL_DIR))
+
+from playbook_specs import classify_signal_playbooks, get_playbook_spec
 
 
 def _f(value: Any, default: float = 0.0) -> float:
@@ -58,6 +70,18 @@ def _quality_bonus(sig: dict[str, Any]) -> float:
     }.get(str(sig.get("quality_grade") or "").upper(), 0.0)
 
 
+def _dynamic_arm_stop(sig: dict[str, Any]) -> float:
+    direction = str(sig.get("direction") or "").lower()
+    zone_low = _f(sig.get("entry_zone_low", sig.get("entry")))
+    zone_high = _f(sig.get("entry_zone_high", sig.get("entry")))
+    tick = 0.25
+    if direction == "long":
+        return round(zone_low - tick, 2)
+    if direction == "short":
+        return round(zone_high + tick, 2)
+    return round(_f(sig.get("sl")), 2)
+
+
 @dataclass(slots=True)
 class ExecutionConfig:
     min_signal_confidence: int = 72
@@ -78,13 +102,27 @@ class ExecutionConfig:
     soft_cluster: int = 2
     break_even_buffer: float = 0.25
     lock_profit_r: float = 0.35
-    allow_legacy_fallback: bool = False
+    allow_legacy_fallback: bool = True
     session_trade_cap: int = 10
     session_direction_cap: int = 6
     family_cooldown_win_bars: int = 8
     family_cooldown_loss_bars: int = 16
     zone_cooldown_bars: int = 20
     zone_reuse_points: float = 8.0
+    min_regime_confidence: int = 62
+    min_chop_signal_confidence: int = 70
+    min_chop_cluster: int = 2
+    min_trend_signal_confidence: int = 70
+    min_trend_cluster: int = 2
+    macro_swing_min_confidence: int = 74
+    macro_swing_min_cluster: int = 2
+    macro_swing_max_dist_atr: float = 0.95
+    macro_swing_min_target_r: float = 0.20
+    max_chop_hold_bars: int = 12
+    max_transition_hold_bars: int = 18
+    max_trend_hold_bars: int = 26
+    allowed_playbooks: tuple[str, ...] = ()
+    armed_playbooks: tuple[str, ...] = ("PB01",)
 
 
 @dataclass(slots=True)
@@ -92,6 +130,8 @@ class PendingOrder:
     signal_id: str
     signal_name: str
     source_type: str
+    playbook_id: str
+    playbook_title: str
     direction: str
     entry_price: float
     sl_price: float
@@ -108,10 +148,34 @@ class PendingOrder:
 
 
 @dataclass(slots=True)
+class ArmedSetup:
+    signal_id: str
+    signal_name: str
+    source_type: str
+    playbook_id: str
+    playbook_title: str
+    direction: str
+    entry_reference: float
+    entry_zone_low: float
+    entry_zone_high: float
+    sl_price: float
+    tp_price: float
+    risk_pts: float
+    confidence: int
+    cluster: int
+    created_bar: int
+    created_time: str
+    selection_score: float
+    notes: list[str] = field(default_factory=list)
+
+
+@dataclass(slots=True)
 class ManagedPosition:
     signal_id: str
     signal_name: str
     source_type: str
+    playbook_id: str
+    playbook_title: str
     direction: str
     entry_price: float
     sl_price: float
@@ -137,6 +201,8 @@ class ClosedTrade:
     signal_id: str
     signal_name: str
     source_type: str
+    playbook_id: str
+    playbook_title: str
     direction: str
     entry_time: str
     exit_time: str
@@ -164,6 +230,7 @@ class SignalExecutionBot:
 
     def __init__(self, config: ExecutionConfig | None = None) -> None:
         self.config = config or ExecutionConfig()
+        self.armed: ArmedSetup | None = None
         self.pending: PendingOrder | None = None
         self.position: ManagedPosition | None = None
         self.closed_trades: list[ClosedTrade] = []
@@ -197,6 +264,7 @@ class SignalExecutionBot:
                 timestamp,
                 {
                     "signal": self.position.signal_name,
+                    "playbook": self.position.playbook_id,
                     "direction": self.position.direction,
                     "entry": self.position.entry_price,
                     "sl": self.position.sl_price,
@@ -227,11 +295,13 @@ class SignalExecutionBot:
         *,
         bar_index: int,
         timestamp: str,
+        timestamp_et: str | None = None,
         price: float,
         atr: float,
         signals: list[dict[str, Any]],
         market_decision: dict[str, Any],
         state: dict[str, Any],
+        recent_bars: pd.DataFrame | None = None,
     ) -> list[ClosedTrade]:
         closed: list[ClosedTrade] = []
 
@@ -271,11 +341,94 @@ class SignalExecutionBot:
                 closed.append(self._close_position(price, timestamp, outcome, exit_reason))
 
         if self.has_risk():
+            self.armed = None
             return closed
+
+        self._refresh_armed_setup(
+            bar_index=bar_index,
+            timestamp=timestamp,
+            price=price,
+            atr=atr,
+            market_decision=market_decision,
+        )
+        if self.armed is not None:
+            opened = self._try_confirm_armed_setup(
+                bar_index=bar_index,
+                timestamp=timestamp,
+                price=price,
+                recent_bars=recent_bars,
+            )
+            if opened is not None:
+                self.position = opened
+                self.session_trade_count += 1
+                self.session_direction_counts[self.position.direction] += 1
+                self._log_event(
+                    "arm_confirm_open",
+                    bar_index,
+                    timestamp,
+                    {
+                        "signal": self.position.signal_name,
+                        "playbook": self.position.playbook_id,
+                        "direction": self.position.direction,
+                        "entry": self.position.entry_price,
+                        "sl": self.position.sl_price,
+                        "tp": self.position.tp_price,
+                    },
+                )
+                self.armed = None
+                return closed
+
+        if self.armed is None:
+            arm_candidate = self._choose_arm_candidate(
+                signals=signals,
+                market_decision=market_decision,
+                state=state,
+                timestamp=timestamp_et or timestamp,
+                price=price,
+                atr=atr,
+                bar_index=bar_index,
+            )
+            if arm_candidate is not None:
+                self.armed = ArmedSetup(
+                    signal_id=str(arm_candidate["id"]),
+                    signal_name=str(arm_candidate.get("name") or "UNKNOWN"),
+                    source_type=str(arm_candidate.get("source_type") or ""),
+                    playbook_id=str(arm_candidate.get("_playbook_id") or ""),
+                    playbook_title=str(arm_candidate.get("_playbook_title") or ""),
+                    direction=str(arm_candidate["direction"]),
+                    entry_reference=round(_f(arm_candidate.get("entry_reference", arm_candidate.get("entry"))), 2),
+                    entry_zone_low=round(_f(arm_candidate.get("entry_zone_low", arm_candidate.get("entry"))), 2),
+                    entry_zone_high=round(_f(arm_candidate.get("entry_zone_high", arm_candidate.get("entry"))), 2),
+                    sl_price=round(_f(arm_candidate.get("_armed_sl_price", arm_candidate["sl"])), 2),
+                    tp_price=round(_f(arm_candidate["tp1"]), 2),
+                    risk_pts=round(_f(arm_candidate.get("_armed_risk_pts")), 2),
+                    confidence=_i(arm_candidate.get("confidence_pct")),
+                    cluster=_cluster(arm_candidate),
+                    created_bar=bar_index,
+                    created_time=timestamp,
+                    selection_score=round(_f(arm_candidate.get("_exec_score")), 2),
+                    notes=list(arm_candidate.get("_exec_notes") or []),
+                )
+                self._log_event(
+                    "arm_setup",
+                    bar_index,
+                    timestamp,
+                    {
+                        "signal": self.armed.signal_name,
+                        "playbook": self.armed.playbook_id,
+                        "direction": self.armed.direction,
+                        "entry_reference": self.armed.entry_reference,
+                        "zone_low": self.armed.entry_zone_low,
+                        "zone_high": self.armed.entry_zone_high,
+                        "score": self.armed.selection_score,
+                    },
+                )
 
         candidate = self._choose_signal(
             signals=signals,
             market_decision=market_decision,
+            state=state,
+            timestamp=timestamp_et or timestamp,
             price=price,
             atr=atr,
             bar_index=bar_index,
@@ -287,6 +440,8 @@ class SignalExecutionBot:
             signal_id=str(candidate["id"]),
             signal_name=str(candidate.get("name") or "UNKNOWN"),
             source_type=str(candidate.get("source_type") or ""),
+            playbook_id=str(candidate.get("_playbook_id") or ""),
+            playbook_title=str(candidate.get("_playbook_title") or ""),
             direction=str(candidate["direction"]),
             entry_price=round(_f(candidate["entry"]), 2),
             sl_price=round(_f(candidate["sl"]), 2),
@@ -307,6 +462,7 @@ class SignalExecutionBot:
             timestamp,
             {
                 "signal": self.pending.signal_name,
+                "playbook": self.pending.playbook_id,
                 "direction": self.pending.direction,
                 "entry": self.pending.entry_price,
                 "sl": self.pending.sl_price,
@@ -318,6 +474,7 @@ class SignalExecutionBot:
 
     def flatten(self, *, price: float, timestamp: str, reason: str) -> list[ClosedTrade]:
         closed: list[ClosedTrade] = []
+        self.armed = None
         if self.pending is not None:
             self.pending = None
         if self.position is not None:
@@ -330,25 +487,29 @@ class SignalExecutionBot:
         *,
         signals: list[dict[str, Any]],
         market_decision: dict[str, Any],
+        state: dict[str, Any],
+        timestamp: str,
         price: float,
         atr: float,
         bar_index: int,
     ) -> dict[str, Any] | None:
         decision_bias = str(market_decision.get("bias") or "neutral").lower()
-        decision_conf = _i(market_decision.get("confidence"))
         action = str(market_decision.get("action") or "wait").lower()
-        if decision_bias not in {"long", "short"}:
+        playbook_mode = bool(self.config.allowed_playbooks)
+        if not playbook_mode and decision_bias not in {"long", "short"}:
             return None
-        if action in {"wait", "watch_rotation", "unavailable"}:
+        if not playbook_mode and action in {"wait", "watch_rotation", "unavailable"}:
             return None
         if self.session_trade_count >= self.config.session_trade_cap:
             return None
-        if self.session_direction_counts[decision_bias] >= self.config.session_direction_cap:
+        if not playbook_mode and self.session_direction_counts[decision_bias] >= self.config.session_direction_cap:
             return None
 
         eligible = self.rank_signals(
             signals=signals,
             market_decision=market_decision,
+            state=state,
+            timestamp=timestamp,
             price=price,
             atr=atr,
             bar_index=bar_index,
@@ -357,40 +518,73 @@ class SignalExecutionBot:
             return None
         return eligible[0]
 
+    def _choose_arm_candidate(
+        self,
+        *,
+        signals: list[dict[str, Any]],
+        market_decision: dict[str, Any],
+        state: dict[str, Any],
+        timestamp: str,
+        price: float,
+        atr: float,
+        bar_index: int,
+    ) -> dict[str, Any] | None:
+        eligible = self.rank_signals(
+            signals=signals,
+            market_decision=market_decision,
+            state=state,
+            timestamp=timestamp,
+            price=price,
+            atr=atr,
+            bar_index=bar_index,
+            arm_only=True,
+        )
+        return eligible[0] if eligible else None
+
     def rank_signals(
         self,
         *,
         signals: list[dict[str, Any]],
         market_decision: dict[str, Any],
+        state: dict[str, Any],
+        timestamp: str,
         price: float,
         atr: float,
         bar_index: int,
+        arm_only: bool = False,
     ) -> list[dict[str, Any]]:
         decision_bias = str(market_decision.get("bias") or "neutral").lower()
         decision_conf = _i(market_decision.get("confidence"))
         action = str(market_decision.get("action") or "wait").lower()
-        if decision_bias not in {"long", "short"}:
+        regime = str((state or {}).get("regime") or market_decision.get("regime") or "unknown").lower()
+        playbook_mode = bool(self.config.allowed_playbooks)
+        if not playbook_mode and decision_bias not in {"long", "short"}:
             return []
-        if action in {"wait", "watch_rotation", "unavailable"}:
+        if not playbook_mode and action in {"wait", "watch_rotation", "unavailable"}:
             return []
         if self.session_trade_count >= self.config.session_trade_cap:
             return []
-        if self.session_direction_counts[decision_bias] >= self.config.session_direction_cap:
+        if not playbook_mode and self.session_direction_counts[decision_bias] >= self.config.session_direction_cap:
             return []
 
         eligible: list[dict[str, Any]] = []
         for sig in signals:
-            if str(sig.get("direction") or "").lower() != decision_bias:
+            entry_mode = str(sig.get("entry_mode") or sig.get("entry_type") or "").lower()
+            sig_direction = str(sig.get("direction") or "").lower()
+            if not playbook_mode and sig_direction != decision_bias:
                 continue
-            if not self._is_tradeable_signal(sig):
+            if self.session_direction_counts[sig_direction] >= self.config.session_direction_cap:
+                continue
+            if arm_only:
+                if entry_mode not in {"micro_confirm_only", "micro_confirm_wait"}:
+                    continue
+            elif not self._is_tradeable_signal(sig):
                 continue
             if not self._has_directional_levels(sig):
                 continue
 
             risk_pts = abs(_f(sig.get("entry")) - _f(sig.get("sl")))
             if risk_pts <= 0:
-                continue
-            if risk_pts > self.config.max_initial_risk_points:
                 continue
 
             lead_kind = str(sig.get("lead_signal_kind") or sig.get("signal_kind") or "").lower()
@@ -399,65 +593,132 @@ class SignalExecutionBot:
 
             target_pts = abs(_f(sig.get("tp1")) - _f(sig.get("entry")))
             target_r = target_pts / max(risk_pts, 0.25)
-            if target_r < self.config.min_target_r_multiple:
-                continue
 
             confidence = _i(sig.get("confidence_pct"))
             cluster = _cluster(sig)
             dist_atr = abs(_f(sig.get("entry")) - price) / max(atr, 0.25)
             notes: list[str] = []
+            source_type = str(sig.get("source_type") or "").lower()
+            is_macro = "macro_swing" in source_type
+            is_micro_core = any(token in source_type for token in ("micro_smc", "break_retest", "reclaim", "ifvg_reclaim", "vwap_reclaim"))
+            is_vwap_core = any(token in source_type for token in ("vwap_bounce", "vwap_loss"))
+            is_chop_like = regime in {"chop", "transition"}
+            is_trend_like = regime in {"trend_up", "trend_down"}
 
             if self._on_cooldown(sig, bar_index=bar_index):
                 continue
 
+            matched_playbooks = classify_signal_playbooks(
+                sig,
+                regime=regime,
+                timestamp_et=timestamp,
+                allowed_playbooks=self.config.allowed_playbooks,
+            )
+            if not matched_playbooks:
+                continue
+            playbook = matched_playbooks[0]
+            if arm_only and playbook.playbook_id not in {item.upper() for item in self.config.armed_playbooks}:
+                continue
+
+            if playbook_mode:
+                effective_decision_conf = max(decision_conf, playbook.min_decision_confidence)
+            else:
+                effective_decision_conf = decision_conf
+
             strict_ok = (
-                confidence >= self.config.min_signal_confidence
-                and decision_conf >= self.config.min_decision_confidence
-                and dist_atr <= self.config.max_entry_dist_atr
+                confidence >= playbook.min_signal_confidence
+                and cluster >= playbook.min_cluster
+                and effective_decision_conf >= playbook.min_decision_confidence
+                and dist_atr <= playbook.max_entry_dist_atr
+                and risk_pts <= playbook.max_initial_risk_points
+                and target_r >= playbook.min_target_r_multiple
             )
-            soft_ok = (
-                confidence >= self.config.soft_signal_confidence
-                and cluster >= self.config.soft_cluster
-                and decision_conf >= self.config.min_decision_confidence
-                and dist_atr <= (self.config.max_entry_dist_atr + 0.35)
-            )
-            if not strict_ok and not soft_ok:
+            if arm_only:
+                armed_sl = _dynamic_arm_stop(sig)
+                armed_risk_pts = abs(_f(sig.get("entry_reference", sig.get("entry"))) - armed_sl)
+                armed_target_r = target_pts / max(armed_risk_pts, 0.25)
+                strict_ok = (
+                    confidence >= max(playbook.min_signal_confidence - 2, 68)
+                    and cluster >= max(playbook.min_cluster, 1)
+                    and dist_atr <= playbook.max_entry_dist_atr
+                    and armed_risk_pts <= playbook.max_initial_risk_points
+                    and armed_target_r >= max(playbook.min_target_r_multiple, 0.35)
+                )
+            if not strict_ok:
                 continue
 
             score = float(confidence)
-            score += decision_conf * 0.35
+            score += effective_decision_conf * 0.35
             score += cluster * 4.0
             score += _quality_bonus(sig)
             score -= dist_atr * 9.0
             score -= max(0.0, risk_pts - max(atr * 0.85, 2.0)) * 2.0
             score += min(target_r, 0.75) * 8.0
+            score += playbook.selection_bonus
+            if sig_direction == decision_bias:
+                score += 2.0
+                notes.append("decision_aligned")
+            elif decision_bias in {"long", "short"} and decision_conf >= self.config.soft_flip_confidence:
+                score -= 3.0
+                notes.append("decision_conflict")
 
-            source_type = str(sig.get("source_type") or "").lower()
             if "break_retest" in source_type:
                 score += 4.0
                 notes.append("break_retest")
             if "fvg_fill" in source_type:
                 score += 3.0
                 notes.append("fvg_fill")
-            if "pullback" in source_type or "reclaim" in source_type:
+            if "pullback" in source_type:
                 score += 2.0
-                notes.append("pullback_or_reclaim")
+                notes.append("pullback")
+            if "reclaim" in source_type:
+                score += 5.0
+                notes.append("reclaim")
+            if "ifvg" in source_type:
+                score += 4.0
+                notes.append("ifvg")
+            if arm_only:
+                score += 2.0
+                notes.append("armed_watch")
+            if is_micro_core:
+                score += 4.0
+                notes.append("core_micro")
+            if is_vwap_core:
+                score += 2.0
+                notes.append("vwap_core")
             if cluster >= self.config.strong_cluster:
                 score += 6.0
                 notes.append("strong_cluster")
-            if not strict_ok:
-                score -= 5.0
-                notes.append("soft_fallback")
-            if "macro_swing" in source_type and decision_conf < 78:
-                score -= 8.0
+            if is_macro and not is_micro_core:
+                score -= 7.0
                 notes.append("macro_swing_needs_stronger_context")
             if target_r < 0.25:
                 score -= 3.0
                 notes.append("tight_target")
+            if is_chop_like:
+                if not is_micro_core and not is_vwap_core:
+                    score -= max(0.0, 74 - confidence) * 0.9
+                    score -= max(0.0, 2 - cluster) * 3.5
+                    notes.append("chop_requires_confirmation")
+                else:
+                    score += 1.5
+                    notes.append("chop_core")
+            elif is_trend_like:
+                score += 1.5
+                notes.append("trend_regime_support")
+            if is_macro:
+                score -= max(0.0, 78 - confidence) * 0.8
+                notes.append("macro_swing_regime_gate")
+            notes.append(playbook.playbook_id.lower())
 
             item = dict(sig)
             item["_exec_score"] = round(score, 2)
             item["_exec_notes"] = notes
+            item["_playbook_id"] = playbook.playbook_id
+            item["_playbook_title"] = playbook.title
+            if arm_only:
+                item["_armed_sl_price"] = round(armed_sl, 2)
+                item["_armed_risk_pts"] = round(armed_risk_pts, 2)
             eligible.append(item)
 
         eligible.sort(
@@ -470,15 +731,174 @@ class SignalExecutionBot:
         )
         return eligible
 
+    def _refresh_armed_setup(
+        self,
+        *,
+        bar_index: int,
+        timestamp: str,
+        price: float,
+        atr: float,
+        market_decision: dict[str, Any],
+    ) -> None:
+        armed = self.armed
+        if armed is None:
+            return
+        max_pending_bars = int(self._playbook_threshold(armed.playbook_id, "max_pending_bars", self.config.max_pending_bars))
+        if (bar_index - armed.created_bar) > max_pending_bars:
+            self._log_event(
+                "arm_expire",
+                bar_index,
+                timestamp,
+                {"signal": armed.signal_name, "playbook": armed.playbook_id, "direction": armed.direction},
+            )
+            self.armed = None
+            return
+        decision_bias = str(market_decision.get("bias") or "neutral").lower()
+        decision_conf = _i(market_decision.get("confidence"))
+        if decision_bias not in {armed.direction, "neutral", "rotation"} and decision_conf >= self.config.soft_flip_confidence:
+            self._log_event(
+                "arm_cancel_flip",
+                bar_index,
+                timestamp,
+                {"signal": armed.signal_name, "playbook": armed.playbook_id, "direction": armed.direction},
+            )
+            self.armed = None
+            return
+        if armed.direction == "long" and price < (armed.entry_reference - max(atr, 0.25) * 0.35):
+            self._log_event(
+                "arm_invalidate",
+                bar_index,
+                timestamp,
+                {"signal": armed.signal_name, "playbook": armed.playbook_id, "direction": armed.direction},
+            )
+            self.armed = None
+            return
+        if armed.direction == "short" and price > (armed.entry_reference + max(atr, 0.25) * 0.35):
+            self._log_event(
+                "arm_invalidate",
+                bar_index,
+                timestamp,
+                {"signal": armed.signal_name, "playbook": armed.playbook_id, "direction": armed.direction},
+            )
+            self.armed = None
+
+    def _try_confirm_armed_setup(
+        self,
+        *,
+        bar_index: int,
+        timestamp: str,
+        price: float,
+        recent_bars: pd.DataFrame | None,
+    ) -> ManagedPosition | None:
+        armed = self.armed
+        if armed is None or recent_bars is None or len(recent_bars) < 3:
+            return None
+        if bar_index <= armed.created_bar:
+            return None
+
+        recent = recent_bars.copy()
+        recent["datetime"] = pd.to_datetime(recent["datetime"])
+        current = recent.iloc[-1]
+        prev = recent.iloc[-2]
+        pullback_bars = recent[pd.to_datetime(recent["datetime"]) >= pd.Timestamp(armed.created_time)].iloc[:-1]
+        if pullback_bars.empty:
+            return None
+
+        tick = 0.25
+        direction = armed.direction
+        zone_low = armed.entry_zone_low
+        zone_high = armed.entry_zone_high
+        reference = armed.entry_reference
+        atr = max(abs(armed.entry_reference - armed.sl_price), 4.0)
+        playbook_id = armed.playbook_id.upper()
+
+        def _delta_supports(value: Any, want_long: bool) -> bool:
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                return True
+            if pd.isna(parsed):
+                return True
+            return parsed >= 0.0 if want_long else parsed <= 0.0
+
+        entry_price = price
+        if direction == "long":
+            touched = (
+                (pd.to_numeric(pullback_bars["low"], errors="coerce") <= zone_high)
+                & (pd.to_numeric(pullback_bars["high"], errors="coerce") >= zone_low)
+            ).any()
+            current_close = float(current["close"])
+            current_open = float(current["open"])
+            current_low = float(current["low"])
+            current_high = float(current["high"])
+            prev_high = float(prev["high"])
+            delta_ok = _delta_supports(current.get("delta", 0.0), True)
+            body_ok = current_close > current_open
+            if playbook_id == "PB01":
+                trigger_ok = current_close >= max(prev_high + tick, reference)
+                hold_ok = current_close >= zone_low and current_high >= prev_high + tick
+                entry_price = max(reference, prev_high + tick)
+            else:
+                trigger_ok = current_close >= prev_high + tick and current_close >= reference - atr * 0.02
+                hold_ok = current_low >= zone_low - atr * 0.08
+            if not (touched and delta_ok and body_ok and trigger_ok and hold_ok):
+                return None
+        else:
+            touched = (
+                (pd.to_numeric(pullback_bars["high"], errors="coerce") >= zone_low)
+                & (pd.to_numeric(pullback_bars["low"], errors="coerce") <= zone_high)
+            ).any()
+            current_close = float(current["close"])
+            current_open = float(current["open"])
+            current_high = float(current["high"])
+            current_low = float(current["low"])
+            prev_low = float(prev["low"])
+            delta_ok = _delta_supports(current.get("delta", 0.0), False)
+            body_ok = current_close < current_open
+            if playbook_id == "PB01":
+                trigger_ok = current_close <= min(prev_low - tick, reference)
+                hold_ok = current_close <= zone_high and current_low <= prev_low - tick
+                entry_price = min(reference, prev_low - tick)
+            else:
+                trigger_ok = current_close <= prev_low - tick and current_close <= reference + atr * 0.02
+                hold_ok = current_high <= zone_high + atr * 0.08
+            if not (touched and delta_ok and body_ok and trigger_ok and hold_ok):
+                return None
+
+        return ManagedPosition(
+            signal_id=armed.signal_id,
+            signal_name=armed.signal_name,
+            source_type=armed.source_type,
+            playbook_id=armed.playbook_id,
+            playbook_title=armed.playbook_title,
+            direction=armed.direction,
+            entry_price=round(entry_price, 2),
+            sl_price=armed.sl_price,
+            tp_price=armed.tp_price,
+            initial_risk=max(round(abs(entry_price - armed.sl_price), 2), 0.25),
+            confidence=armed.confidence,
+            cluster=armed.cluster,
+            opened_bar=bar_index,
+            opened_time=timestamp,
+            decision_bias=armed.direction,
+            decision_confidence=max(armed.confidence, 68),
+            current_sl=armed.sl_price,
+            current_tp=armed.tp_price,
+            max_favorable_price=price,
+            max_adverse_price=price,
+            notes=list(armed.notes) + ["armed_pb01_confirm_open"],
+        )
+
     def _is_tradeable_signal(self, sig: dict[str, Any]) -> bool:
         source_type = str(sig.get("source_type") or "").lower()
         signal_name = str(sig.get("name") or "").upper()
         entry_mode = str(sig.get("entry_mode") or sig.get("entry_type") or "").lower()
         engine_mode = str(sig.get("engine_mode") or "").lower()
         lead_kind = str(sig.get("lead_signal_kind") or sig.get("signal_kind") or "").lower()
+        is_legacy = "legacy_fallback" in engine_mode or entry_mode == "legacy_composite_fallback"
 
         if not self.config.allow_legacy_fallback:
-            if "legacy_fallback" in engine_mode or entry_mode == "legacy_composite_fallback":
+            if is_legacy:
                 return False
             if signal_name and not signal_name.startswith("FINAL_MTF_"):
                 return False
@@ -495,6 +915,18 @@ class SignalExecutionBot:
             "ns_absorption_sweep",
             "ns_delta_streak",
             "ns_vwap_mean_reversion",
+            "break_retest_long",
+            "break_retest_short",
+            "fvg_fill_long",
+            "fvg_fill_short",
+            "bos_bull_long",
+            "bos_bear_short",
+            "choch_bull_long",
+            "choch_bear_short",
+            "pullback_long",
+            "pullback_short",
+            "ema_bounce_long",
+            "ema_bounce_short",
         }
         if lead_kind and lead_kind not in allowed_kinds:
             return False
@@ -549,6 +981,12 @@ class SignalExecutionBot:
         width = max(self.config.zone_reuse_points, 1.0)
         return int(round(entry / width))
 
+    def _playbook_threshold(self, playbook_id: str, field_name: str, default: Any) -> Any:
+        spec = get_playbook_spec(playbook_id)
+        if spec is None:
+            return default
+        return getattr(spec, field_name, default)
+
     def _should_cancel_pending(
         self,
         pending: PendingOrder,
@@ -559,9 +997,12 @@ class SignalExecutionBot:
         market_decision: dict[str, Any],
         signals: list[dict[str, Any]],
     ) -> bool:
-        if (bar_index - pending.created_bar) >= self.config.max_pending_bars:
+        max_pending_bars = int(self._playbook_threshold(pending.playbook_id, "max_pending_bars", self.config.max_pending_bars))
+        max_entry_dist_atr = float(self._playbook_threshold(pending.playbook_id, "max_entry_dist_atr", self.config.max_entry_dist_atr))
+
+        if (bar_index - pending.created_bar) >= max_pending_bars:
             return True
-        if abs(price - pending.entry_price) / max(atr, 0.25) > (self.config.max_entry_dist_atr + 0.9):
+        if abs(price - pending.entry_price) / max(atr, 0.25) > (max_entry_dist_atr + 0.9):
             return True
 
         decision_bias = str(market_decision.get("bias") or "neutral").lower()
@@ -600,6 +1041,8 @@ class SignalExecutionBot:
             signal_id=pending.signal_id,
             signal_name=pending.signal_name,
             source_type=pending.source_type,
+            playbook_id=pending.playbook_id,
+            playbook_title=pending.playbook_title,
             direction=pending.direction,
             entry_price=entry,
             sl_price=pending.sl_price,
@@ -632,13 +1075,18 @@ class SignalExecutionBot:
 
     def _tighten_risk(self, pos: ManagedPosition, price: float) -> None:
         progress_r = self._progress_r(pos, price)
-        if progress_r >= self.config.be_progress_r:
+        be_progress_r = float(self._playbook_threshold(pos.playbook_id, "be_progress_r", self.config.be_progress_r))
+        lock_progress_r = float(self._playbook_threshold(pos.playbook_id, "lock_progress_r", self.config.lock_progress_r))
+        break_even_buffer = float(self._playbook_threshold(pos.playbook_id, "break_even_buffer", self.config.break_even_buffer))
+        lock_profit_r = float(self._playbook_threshold(pos.playbook_id, "lock_profit_r", self.config.lock_profit_r))
+
+        if progress_r >= be_progress_r:
             if pos.direction == "long":
-                pos.current_sl = max(pos.current_sl, pos.entry_price + self.config.break_even_buffer)
+                pos.current_sl = max(pos.current_sl, pos.entry_price + break_even_buffer)
             else:
-                pos.current_sl = min(pos.current_sl, pos.entry_price - self.config.break_even_buffer)
-        if progress_r >= self.config.lock_progress_r:
-            lock_points = max(self.config.lock_profit_r * pos.initial_risk, 0.5)
+                pos.current_sl = min(pos.current_sl, pos.entry_price - break_even_buffer)
+        if progress_r >= lock_progress_r:
+            lock_points = max(lock_profit_r * pos.initial_risk, 0.5)
             if pos.direction == "long":
                 pos.current_sl = max(pos.current_sl, pos.entry_price + lock_points)
             else:
@@ -655,6 +1103,8 @@ class SignalExecutionBot:
         state: dict[str, Any],
     ) -> str | None:
         progress_r = self._progress_r(pos, price)
+        max_position_bars = int(self._playbook_threshold(pos.playbook_id, "max_position_bars", self.config.max_position_bars))
+        soft_exit_progress_r = float(self._playbook_threshold(pos.playbook_id, "soft_exit_progress_r", self.config.soft_exit_progress_r))
         decision_bias = str(market_decision.get("bias") or "neutral").lower()
         decision_conf = _i(market_decision.get("confidence"))
         action = str(market_decision.get("action") or "wait").lower()
@@ -679,10 +1129,20 @@ class SignalExecutionBot:
         if hard_flip and (opp_best >= self.config.hard_flip_confidence or opp_cluster >= self.config.strong_cluster):
             return "opposite_hard_flip"
 
-        if pos.bars_held >= self.config.max_position_bars:
+        regime = str((state or {}).get("regime") or market_decision.get("regime") or "unknown").lower()
+        if regime in {"chop", "transition"} and pos.bars_held >= self.config.max_chop_hold_bars:
+            weak_same_side = same_best < max(62, pos.confidence - 12)
+            if weak_same_side:
+                return f"{regime}_regime_exit"
+        if regime in {"trend_up", "trend_down"} and pos.bars_held >= self.config.max_transition_hold_bars:
+            weak_same_side = same_best < max(60, pos.confidence - 14)
+            if weak_same_side and opp_best >= self.config.soft_flip_confidence:
+                return "trend_decay_exit"
+
+        if pos.bars_held >= max_position_bars:
             return "time_exit"
 
-        if progress_r >= self.config.soft_exit_progress_r:
+        if progress_r >= soft_exit_progress_r:
             weak_same_side = same_best < max(60, pos.confidence - 18)
             soft_flip = (
                 decision_bias not in {pos.direction}
@@ -728,6 +1188,8 @@ class SignalExecutionBot:
             signal_id=pos.signal_id,
             signal_name=pos.signal_name,
             source_type=pos.source_type,
+            playbook_id=pos.playbook_id,
+            playbook_title=pos.playbook_title,
             direction=pos.direction,
             entry_time=pos.opened_time,
             exit_time=timestamp,
@@ -762,6 +1224,7 @@ class SignalExecutionBot:
             timestamp,
             {
                 "signal": closed.signal_name,
+                "playbook": closed.playbook_id,
                 "direction": closed.direction,
                 "exit_reason": closed.exit_reason,
                 "gross_points": closed.gross_points,
@@ -787,6 +1250,7 @@ class SignalExecutionBot:
 
     def export_state(self) -> dict[str, Any]:
         return {
+            "armed": asdict(self.armed) if self.armed else None,
             "pending": asdict(self.pending) if self.pending else None,
             "position": asdict(self.position) if self.position else None,
             "closed_trades": [asdict(t) for t in self.closed_trades[-20:]],

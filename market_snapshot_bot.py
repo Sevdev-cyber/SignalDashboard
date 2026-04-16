@@ -235,6 +235,7 @@ class MarketSnapshotBot:
         guide = snapshot.trader_guide or {}
         tf5 = guide.get("tf_5m") or {}
         tf15 = guide.get("tf_15m") or {}
+        htf = guide.get("htf_audit") or {}
 
         long_score = 0.0
         short_score = 0.0
@@ -254,7 +255,7 @@ class MarketSnapshotBot:
         self._score_regime(snapshot, add)
         self._score_vwap(snapshot, add)
         self._score_flow(snapshot, add)
-        self._score_guide(snapshot, guide, tf5, tf15, add)
+        self._score_guide(snapshot, guide, tf5, tf15, htf, add)
         self._score_signals(snapshot, add)
 
         bias, confidence = self._derive_bias(long_score, short_score)
@@ -368,12 +369,27 @@ class MarketSnapshotBot:
         elif s.rsi <= 32:
             add("long", 0.5, "RSI is stretched to the downside.")
 
-    def _score_guide(self, s: MarketSnapshot, guide: dict[str, Any], tf5: dict[str, Any], tf15: dict[str, Any], add) -> None:
+    def _score_guide(
+        self,
+        s: MarketSnapshot,
+        guide: dict[str, Any],
+        tf5: dict[str, Any],
+        tf15: dict[str, Any],
+        htf: dict[str, Any],
+        add,
+    ) -> None:
         overall_bias = _norm_str(guide.get("overall_bias"), "neutral")
         if overall_bias in {"long", "neutral_to_long"}:
             add("long", 2.0 if overall_bias == "long" else 1.0, "Trader guide leans long.")
         elif overall_bias in {"short", "neutral_to_short"}:
             add("short", 2.0 if overall_bias == "short" else 1.0, "Trader guide leans short.")
+
+        htf_bias = _norm_str(htf.get("pre_signal_bias"), "neutral")
+        htf_conf = _int(htf.get("pre_signal_confidence"))
+        if htf_bias == "long":
+            add("long", 1.5 + min(1.5, htf_conf / 100.0), "HTF audit leans long.")
+        elif htf_bias == "short":
+            add("short", 1.5 + min(1.5, htf_conf / 100.0), "HTF audit leans short.")
 
         if tf5.get("bias") == "long":
             add("long", 1.0, "5m guide is long.")
@@ -459,6 +475,7 @@ class MarketSnapshotBot:
     ) -> tuple[str, str, float | None, float | None, dict[str, Any] | None, dict[str, Any] | None]:
         tf5 = guide.get("tf_5m") or {}
         tf15 = guide.get("tf_15m") or {}
+        htf = guide.get("htf_audit") or {}
         best_long = guide.get("best_long_zone") if isinstance(guide.get("best_long_zone"), dict) else {}
         best_short = guide.get("best_short_zone") if isinstance(guide.get("best_short_zone"), dict) else {}
 
@@ -526,6 +543,9 @@ class MarketSnapshotBot:
 
         if action == "wait":
             summary = "Wait for a cleaner trigger. Current structure is not strong enough."
+        htf_summary = _norm_str(htf.get("summary_short") or htf.get("summary"))
+        if htf_summary:
+            summary = f"{summary} HTF: {htf_summary}"
 
         return scenario, summary, trigger_level, invalidation_level, entry_zone, target_zone
 

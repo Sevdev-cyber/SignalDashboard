@@ -157,6 +157,16 @@ DAY_EDGES = {
     4: {"label": "Friday standard", "long_mult": 1.0, "short_mult": 1.0},
 }
 
+GUIDE_SPECS = (
+    {"key": "tf_5m", "timeframe": 5, "label": "5m", "min_bars": 20, "weight": 1.0},
+    {"key": "tf_15m", "timeframe": 15, "label": "15m", "min_bars": 20, "weight": 1.8},
+    {"key": "tf_1h", "timeframe": "1H", "label": "1H", "min_bars": 10, "weight": 1.5},
+    {"key": "tf_4h", "timeframe": "4H", "label": "4H", "min_bars": 6, "weight": 2.0},
+    {"key": "tf_1d", "timeframe": "1D", "label": "1D", "min_bars": 5, "weight": 2.6},
+    {"key": "tf_1w", "timeframe": "1W", "label": "1W", "min_bars": 3, "weight": 1.2},
+    {"key": "tf_1mo", "timeframe": "1M", "label": "1M", "min_bars": 3, "weight": 1.0},
+)
+
 
 class SignalEngine:
     """Evaluates all signals and returns enriched candidates for dashboard."""
@@ -455,18 +465,44 @@ class SignalEngine:
             sig["tier_label"] = gold_label
 
         # POST-PROCESSING: Wzmacnianie i dławienie sygnałów według wyników testu 120-dniowego
+        
+        # HSB v11.5: Strict Directional Rule (Macro Boss constraint)
+        # 1. Odczytanie wymuszenia z pliku z chmury (od LLM Workera)
+        macro_bias = "NEUTRAL"
+        try:
+            macro_path = Path(__file__).resolve().parent / "runtime" / "live_mnq_intraday_llm_context.json"
+            if macro_path.exists():
+                macro_data = json.loads(macro_path.read_text(encoding="utf-8"))
+                bias_val = str(macro_data.get("bias", "")).upper()
+                if "BEAR" in bias_val or "SHORT" in bias_val:
+                    macro_bias = "BEARISH"
+                elif "BULL" in bias_val or "LONG" in bias_val:
+                    macro_bias = "BULLISH"
+        except Exception as e:
+            log.debug("Strict Directional Rule - Could not read Macro Bias: %s", e)
+            
         for sig in enriched:
             # 0. Twarde wycięcie trucizn (FVG_FILL, BOS_BULL)
             if "FVG_FILL" in sig["name"] or "BOS_BULL" in sig["name"]:
                 sig["confidence_pct"] = 0
                 continue
+                
+            # HSB v11.5: Strict Direction filter execution
+            if macro_bias == "BEARISH" and sig["direction"] == "long":
+                sig["confidence_pct"] = 0
+                sig["conflict_note"] = "BLOCKED BY MACRO BOSS (BEARISH)"
+                continue
+            if macro_bias == "BULLISH" and sig["direction"] == "short":
+                sig["confidence_pct"] = 0
+                sig["conflict_note"] = "BLOCKED BY MACRO BOSS (BULLISH)"
+                continue
 
-            # 0a. Minimum RR filter — reject signals with risk > reward
+            # 0a. Minimum RR filter — HSB v11.5 strict 1:1.5 threshold
             rr = sig["rr_ratio"]
             if sig["risk_pts"] > 0:
                 actual_rr = abs(sig["tp1"] - sig["entry"]) / sig["risk_pts"]
-                if actual_rr < 1.0:
-                    sig["confidence_pct"] = int(sig["confidence_pct"] * 0.4)  # heavy penalty
+                if actual_rr < 1.5:
+                    sig["confidence_pct"] = int(sig["confidence_pct"] * 0.1)  # heavy penalty for bad R:R
 
             # 0b. Trend filter dla PULLBACK
             if "PULLBACK" in sig["name"]:
@@ -839,32 +875,49 @@ class SignalEngine:
         }
 
     def _build_trader_guide(self, bars_df: pd.DataFrame, *, current_price: float) -> dict:
-        guide_5m = self._compute_tf_guide(bars_df, timeframe_min=5, current_price=current_price)
-        guide_15m = self._compute_tf_guide(bars_df, timeframe_min=15, current_price=current_price)
+        guides = {
+            spec["key"]: self._compute_tf_guide(
+                bars_df,
+                timeframe=spec["timeframe"],
+                label=spec["label"],
+                min_bars=spec["min_bars"],
+                current_price=current_price,
+            )
+            for spec in GUIDE_SPECS
+        }
 
-        score = 0
-        if guide_15m["bias"] == "long":
-            score += 2
-        elif guide_15m["bias"] == "short":
-            score -= 2
-        if guide_5m["bias"] == "long":
-            score += 1
-        elif guide_5m["bias"] == "short":
-            score -= 1
+        guide_5m = guides["tf_5m"]
+        guide_15m = guides["tf_15m"]
+        guide_1h = guides["tf_1h"]
+        guide_4h = guides["tf_4h"]
+        guide_1d = guides["tf_1d"]
+        guide_1w = guides["tf_1w"]
+        guide_1mo = guides["tf_1mo"]
 
-        if score >= 2:
-            overall_bias = "long"
-        elif score <= -2:
-            overall_bias = "short"
-        elif score > 0:
-            overall_bias = "neutral_to_long"
-        elif score < 0:
-            overall_bias = "neutral_to_short"
-        else:
-            overall_bias = "neutral"
+        intraday_score = (
+            self._weighted_guide_bias(guide_15m, 2.0)
+            + self._weighted_guide_bias(guide_5m, 1.0)
+        )
+        htf_audit = self._build_htf_audit(
+            guide_1h=guide_1h,
+            guide_4h=guide_4h,
+            guide_1d=guide_1d,
+            guide_1w=guide_1w,
+            guide_1mo=guide_1mo,
+            current_price=current_price,
+        )
+        score = intraday_score + float(htf_audit.get("pre_signal_score") or 0.0)
+        overall_bias = self._overall_bias_from_score(score)
 
-        alignment_bonus = 12 if guide_5m["bias"] == guide_15m["bias"] and guide_5m["bias"] != "neutral" else 0
-        overall_confidence = min(95, max(40, 52 + abs(score) * 10 + alignment_bonus))
+        alignment_frames = [
+            g["timeframe"]
+            for g in (guide_5m, guide_15m, guide_1h, guide_4h, guide_1d)
+            if g.get("bias") in {"long", "short"}
+        ]
+        dominant_side = "long" if score > 0 else "short" if score < 0 else "neutral"
+        aligned_count = sum(1 for g in (guide_5m, guide_15m, guide_1h, guide_4h, guide_1d) if g.get("bias") == dominant_side)
+        alignment_bonus = max(0, aligned_count - 1) * 4
+        overall_confidence = min(96, max(40, int(round(50 + abs(score) * 9 + alignment_bonus))))
 
         zones = []
         for tf_guide in (guide_5m, guide_15m):
@@ -887,6 +940,10 @@ class SignalEngine:
         else:
             summary = "No clean dominance. Treat current area as rotational until 5m and 15m align."
 
+        htf_summary = str(htf_audit.get("summary_short") or "").strip()
+        if htf_summary:
+            summary = f"{summary} HTF: {htf_summary}"
+
         best_long_zone = self._pick_directional_zone("long", guide_5m, guide_15m, current_price=current_price)
         best_short_zone = self._pick_directional_zone("short", guide_5m, guide_15m, current_price=current_price)
         continuation = self._build_continuation_summary(overall_bias, guide_5m, guide_15m, current_price=current_price)
@@ -902,16 +959,31 @@ class SignalEngine:
             "best_short_zone": best_short_zone,
             "tf_5m": guide_5m,
             "tf_15m": guide_15m,
+            "tf_1h": guide_1h,
+            "tf_4h": guide_4h,
+            "tf_1d": guide_1d,
+            "tf_1w": guide_1w,
+            "tf_1mo": guide_1mo,
             "guide_5m": guide_5m,
             "guide_15m": guide_15m,
             "timeframes": [guide_5m, guide_15m],
+            "htf_timeframes": [guide_1h, guide_4h, guide_1d, guide_1w, guide_1mo],
+            "htf_audit": htf_audit,
             "zones": nearest_zones,
         }
 
-    def _compute_tf_guide(self, bars_df: pd.DataFrame, *, timeframe_min: int, current_price: float) -> dict:
-        frame = self._resample_for_guide(bars_df, timeframe_min)
+    def _compute_tf_guide(
+        self,
+        bars_df: pd.DataFrame,
+        *,
+        timeframe: int | str,
+        label: str,
+        min_bars: int,
+        current_price: float,
+    ) -> dict:
+        frame = self._resample_for_guide(bars_df, timeframe)
         empty = {
-            "timeframe": f"{timeframe_min}m",
+            "timeframe": label,
             "bias": "neutral",
             "strength": 0,
             "reversal_risk": "unknown",
@@ -923,8 +995,16 @@ class SignalEngine:
             "continuation_note": "Not enough bars.",
             "reversal_note": "Not enough bars.",
             "trigger_level": round(current_price, 2) if current_price else 0.0,
+            "trigger_zone": None,
+            "history_bars": 0,
+            "history_min_bars": int(min_bars),
+            "history_ok": False,
+            "history_note": f"Need >= {min_bars} bars on {label} for stable context.",
+            "range_high": round(current_price, 2) if current_price else 0.0,
+            "range_low": round(current_price, 2) if current_price else 0.0,
+            "active_fvgs": [],
         }
-        if frame.empty or len(frame) < 20:
+        if frame.empty or len(frame) < 3:
             return empty
 
         last = frame.iloc[-1]
@@ -961,10 +1041,17 @@ class SignalEngine:
             bias = "neutral"
             strength = max(long_score, short_score)
 
-        recent = frame.tail(7 if timeframe_min == 5 else 5).iloc[:-1]
+        recent_window = self._guide_recent_window(label)
+        recent = frame.tail(recent_window).iloc[:-1]
         swing_high = float(recent["high"].max()) if not recent.empty else high
         swing_low = float(recent["low"].min()) if not recent.empty else low
         extension = abs(close - ema20) / atr
+        history_bars = len(frame)
+        history_ok = history_bars >= int(min_bars)
+        range_window = self._guide_range_window(label)
+        context_slice = frame.tail(range_window)
+        range_high = float(context_slice["high"].max()) if not context_slice.empty else high
+        range_low = float(context_slice["low"].min()) if not context_slice.empty else low
 
         continuation_center = (ema20 + vwap) / 2.0
         continuation_half = max(atr * 0.35, abs(ema20 - vwap) / 2.0, 1.0)
@@ -992,7 +1079,7 @@ class SignalEngine:
                 f"Do not chase extension away from value."
             )
             reversal_note = (
-                f"{timeframe_min}m SHORT reversal becomes meaningful only after rejection of {reversal_center:.2f} "
+                f"{label} SHORT reversal becomes meaningful only after rejection of {reversal_center:.2f} "
                 f"and loss of {trigger_level:.2f}."
             )
         elif bias == "short":
@@ -1013,7 +1100,7 @@ class SignalEngine:
                 f"Do not short the hole away from value."
             )
             reversal_note = (
-                f"{timeframe_min}m LONG reversal becomes meaningful only after reclaim of {reversal_center:.2f} "
+                f"{label} LONG reversal becomes meaningful only after reclaim of {reversal_center:.2f} "
                 f"and push back above {trigger_level:.2f}."
             )
         else:
@@ -1041,7 +1128,7 @@ class SignalEngine:
         if continuation_zone:
             guide_zones.append(
                 {
-                    "label": f"{timeframe_min}m predicted area",
+                    "label": f"{label} predicted area",
                     "stage": "predicted",
                     "direction": bias if bias != "neutral" else "neutral",
                     "low": continuation_zone["low"],
@@ -1052,7 +1139,7 @@ class SignalEngine:
             )
             guide_zones.append(
                 {
-                    "label": f"{timeframe_min}m watch area",
+                    "label": f"{label} watch area",
                     "stage": "watch",
                     "direction": bias if bias != "neutral" else "neutral",
                     "low": continuation_zone["low"],
@@ -1064,14 +1151,14 @@ class SignalEngine:
         if bias != "neutral":
             guide_zones.append(
                 {
-                    "label": f"{timeframe_min}m trigger",
+                    "label": f"{label} trigger",
                     "stage": "trigger",
                     "direction": bias,
                     "low": trigger_zone["low"],
                     "high": trigger_zone["high"],
                     "trigger": trigger_level,
                     "why": (
-                        f"{timeframe_min}m {bias.upper()} stays valid only "
+                        f"{label} {bias.upper()} stays valid only "
                         f"{'above' if bias == 'long' else 'below'} {trigger_level:.2f}."
                     ),
                 }
@@ -1079,7 +1166,7 @@ class SignalEngine:
         if reversal_zone:
             guide_zones.append(
                 {
-                    "label": f"{timeframe_min}m reversal watch",
+                    "label": f"{label} reversal watch",
                     "stage": "reversal",
                     "direction": reversal_side,
                     "low": reversal_zone["low"],
@@ -1089,8 +1176,15 @@ class SignalEngine:
                 }
             )
 
+        history_note = (
+            f"{label} context is stable ({history_bars} bars loaded)."
+            if history_ok
+            else f"{label} context is partial ({history_bars}/{min_bars} bars loaded)."
+        )
+        active_fvgs = self._detect_active_fvgs(frame, timeframe_label=label, current_price=current_price)
+
         return {
-            "timeframe": f"{timeframe_min}m",
+            "timeframe": label,
             "bias": bias,
             "strength": int(strength),
             "reversal_risk": reversal_risk,
@@ -1105,7 +1199,271 @@ class SignalEngine:
             "trigger_level": trigger_level,
             "trigger_zone": trigger_zone,
             "guide_zones": guide_zones,
+            "history_bars": int(history_bars),
+            "history_min_bars": int(min_bars),
+            "history_ok": bool(history_ok),
+            "history_note": history_note,
+            "swing_high": round(swing_high, 2),
+            "swing_low": round(swing_low, 2),
+            "range_high": round(range_high, 2),
+            "range_low": round(range_low, 2),
+            "active_fvgs": active_fvgs,
         }
+
+    @staticmethod
+    def _guide_recent_window(label: str) -> int:
+        label = str(label).upper()
+        if label == "5M":
+            return 7
+        if label == "15M":
+            return 6
+        if label == "1H":
+            return 5
+        if label == "4H":
+            return 4
+        return 4
+
+    @staticmethod
+    def _guide_range_window(label: str) -> int:
+        label = str(label).upper()
+        if label == "1D":
+            return 22
+        if label == "4H":
+            return 10
+        if label == "1W":
+            return 13
+        if label == "1M":
+            return 6
+        return 12
+
+    @staticmethod
+    def _weighted_guide_bias(guide: dict, weight: float) -> float:
+        bias = str(guide.get("bias") or "neutral").lower()
+        if bias not in {"long", "short"}:
+            return 0.0
+        history_scale = 1.0 if guide.get("history_ok") else 0.5
+        value = weight * history_scale
+        return value if bias == "long" else -value
+
+    @staticmethod
+    def _overall_bias_from_score(score: float) -> str:
+        if score >= 2.5:
+            return "long"
+        if score <= -2.5:
+            return "short"
+        if score > 0.6:
+            return "neutral_to_long"
+        if score < -0.6:
+            return "neutral_to_short"
+        return "neutral"
+
+    def _build_htf_audit(
+        self,
+        *,
+        guide_1h: dict,
+        guide_4h: dict,
+        guide_1d: dict,
+        guide_1w: dict,
+        guide_1mo: dict,
+        current_price: float,
+    ) -> dict:
+        tactical = [guide_1h, guide_4h, guide_1d]
+        tactical_weights = {"1H": 1.2, "4H": 1.8, "1D": 2.2}
+        tactical_score = sum(
+            self._weighted_guide_bias(guide, tactical_weights.get(str(guide.get("timeframe")), 1.0))
+            for guide in tactical
+        )
+        pre_signal_bias = self._overall_bias_from_score(tactical_score)
+        if pre_signal_bias == "neutral_to_long":
+            pre_signal_bias = "long"
+        elif pre_signal_bias == "neutral_to_short":
+            pre_signal_bias = "short"
+        elif pre_signal_bias == "neutral":
+            pre_signal_bias = "neutral"
+
+        aligned = [
+            guide["timeframe"]
+            for guide in tactical
+            if guide.get("bias") == pre_signal_bias and pre_signal_bias in {"long", "short"}
+        ]
+        mixed = [guide["timeframe"] for guide in tactical if guide.get("bias") not in {pre_signal_bias, "neutral"}]
+        pre_signal_confidence = min(95, max(35, int(round(44 + abs(tactical_score) * 11 + max(0, len(aligned) - 1) * 5))))
+
+        levels = []
+        for guide in (guide_1h, guide_4h, guide_1d, guide_1w, guide_1mo):
+            tf = str(guide.get("timeframe") or "TF")
+            trigger = guide.get("trigger_level")
+            invalidation = guide.get("invalidation_level")
+            if trigger is not None:
+                levels.append(
+                    {
+                        "label": f"{tf} trigger",
+                        "price": round(float(trigger), 2),
+                        "direction": guide.get("bias") or "neutral",
+                        "distance": round(abs(float(trigger) - current_price), 2),
+                        "why": guide.get("continuation_note") or "",
+                    }
+                )
+            for name, value in (("range high", guide.get("range_high")), ("range low", guide.get("range_low"))):
+                if value is None:
+                    continue
+                levels.append(
+                    {
+                        "label": f"{tf} {name}",
+                        "price": round(float(value), 2),
+                        "direction": "neutral",
+                        "distance": round(abs(float(value) - current_price), 2),
+                        "why": guide.get("history_note") or "",
+                    }
+                )
+            if invalidation is not None and invalidation != trigger:
+                levels.append(
+                    {
+                        "label": f"{tf} invalidation",
+                        "price": round(float(invalidation), 2),
+                        "direction": "neutral",
+                        "distance": round(abs(float(invalidation) - current_price), 2),
+                        "why": guide.get("reversal_note") or "",
+                    }
+                )
+
+        levels.sort(key=lambda item: item["distance"])
+        nearest_levels = levels[:8]
+
+        fvgs = []
+        for guide in (guide_1h, guide_4h, guide_1d, guide_1w, guide_1mo):
+            for fvg in guide.get("active_fvgs", []) or []:
+                item = dict(fvg)
+                item["distance"] = round(
+                    min(abs(float(item["low"]) - current_price), abs(float(item["high"]) - current_price)),
+                    2,
+                )
+                fvgs.append(item)
+        fvgs.sort(key=lambda item: item["distance"])
+        nearest_fvgs = fvgs[:6]
+
+        if pre_signal_bias == "long":
+            summary = (
+                f"HTF leans LONG. Hunt continuation/reclaim longs first while {', '.join(aligned) or 'HTF'} stay supportive."
+            )
+            if mixed:
+                summary += f" Opposing pressure still exists on {', '.join(mixed)}."
+            preferred_playbooks = ["break_retest_long", "pullback_long", "ifvg_reclaim_long", "micro_smc_long"]
+            avoid_conditions = ["do_not_short_into_htf_support", "avoid_chasing_far_above_value"]
+        elif pre_signal_bias == "short":
+            summary = (
+                f"HTF leans SHORT. Hunt rejection/continuation shorts first while {', '.join(aligned) or 'HTF'} stay heavy."
+            )
+            if mixed:
+                summary += f" Opposing pressure still exists on {', '.join(mixed)}."
+            preferred_playbooks = ["break_retest_short", "pullback_short", "ifvg_reclaim_short", "micro_smc_short"]
+            avoid_conditions = ["do_not_long_into_htf_resistance", "avoid_shorting_far_below_value"]
+        else:
+            summary = "HTF is mixed. Treat intraday setups as tactical only until 1H/4H/1D align."
+            preferred_playbooks = ["reclaim_only", "range_reversal", "sweep_then_reclaim"]
+            avoid_conditions = ["avoid_breakout_chase", "avoid_signal_stacking_without_alignment"]
+
+        weekly_context = self._describe_structural_frame(guide_1w, current_price=current_price)
+        monthly_context = self._describe_structural_frame(guide_1mo, current_price=current_price)
+        levels_summary = " | ".join(f"{item['label']} {item['price']:.2f}" for item in nearest_levels[:4])
+
+        return {
+            "pre_signal_bias": pre_signal_bias,
+            "pre_signal_score": round(float(tactical_score), 2),
+            "pre_signal_confidence": int(pre_signal_confidence),
+            "aligned_timeframes": aligned,
+            "mixed_timeframes": mixed,
+            "summary": summary,
+            "summary_short": summary,
+            "weekly_context": weekly_context,
+            "monthly_context": monthly_context,
+            "preferred_playbooks": preferred_playbooks,
+            "avoid_conditions": avoid_conditions,
+            "levels": nearest_levels,
+            "levels_summary": levels_summary,
+            "active_fvgs": nearest_fvgs,
+            "history_ready": bool(guide_1h.get("history_bars") or 0),
+            "history_note": (
+                "Increase Bars To Send if you want fuller 1D/1W/1M context."
+                if not guide_1d.get("history_ok") or not guide_1w.get("history_ok") or not guide_1mo.get("history_ok")
+                else "HTF context loaded from local history."
+            ),
+        }
+
+    @staticmethod
+    def _describe_structural_frame(guide: dict, *, current_price: float) -> str:
+        tf = str(guide.get("timeframe") or "TF")
+        if not guide.get("history_bars"):
+            return f"{tf} context unavailable."
+        bias = str(guide.get("bias") or "neutral").lower()
+        range_high = float(guide.get("range_high") or current_price)
+        range_low = float(guide.get("range_low") or current_price)
+        span = max(range_high - range_low, 0.25)
+        range_pos = ((current_price - range_low) / span) * 100.0
+        if bias == "long":
+            return f"{tf} holds long structure; price is {range_pos:.0f}% into its recent range."
+        if bias == "short":
+            return f"{tf} holds short structure; price is {range_pos:.0f}% into its recent range."
+        return f"{tf} is balanced; price is {range_pos:.0f}% into its recent range."
+
+    def _detect_active_fvgs(self, frame: pd.DataFrame, *, timeframe_label: str, current_price: float) -> list[dict]:
+        if frame.empty or len(frame) < 3:
+            return []
+
+        candidates: list[dict] = []
+        for i in range(2, len(frame)):
+            left = frame.iloc[i - 2]
+            cur = frame.iloc[i]
+            if float(left["high"]) < float(cur["low"]):
+                candidates.append(
+                    {
+                        "timeframe": timeframe_label,
+                        "direction": "long",
+                        "low": round(float(left["high"]), 2),
+                        "high": round(float(cur["low"]), 2),
+                        "created_at": str(cur.get("timestamp") or ""),
+                        "age_bars": len(frame) - i - 1,
+                    }
+                )
+            if float(left["low"]) > float(cur["high"]):
+                candidates.append(
+                    {
+                        "timeframe": timeframe_label,
+                        "direction": "short",
+                        "low": round(float(cur["high"]), 2),
+                        "high": round(float(left["low"]), 2),
+                        "created_at": str(cur.get("timestamp") or ""),
+                        "age_bars": len(frame) - i - 1,
+                    }
+                )
+
+        active: list[dict] = []
+        for item in candidates[-12:]:
+            low = float(item["low"])
+            high = float(item["high"])
+            try:
+                created_idx = frame.index[frame["timestamp"] == pd.to_datetime(item["created_at"])][0]
+            except Exception:
+                created_idx = None
+            if created_idx is None:
+                post = frame.tail(int(item["age_bars"]) + 1)
+            else:
+                post = frame.loc[created_idx + 1 :]
+            filled = False
+            if not post.empty:
+                overlap = (post["low"] <= high) & (post["high"] >= low)
+                filled = bool(overlap.any())
+            if filled:
+                continue
+            active.append(item)
+
+        for item in active:
+            item["distance"] = round(
+                min(abs(float(item["low"]) - current_price), abs(float(item["high"]) - current_price)),
+                2,
+            )
+        active.sort(key=lambda item: item["distance"])
+        return active[:3]
 
     def _pick_directional_zone(
         self,
@@ -1223,7 +1581,7 @@ class SignalEngine:
             "message": "No clean predicted area yet. Wait for a structured move into value first.",
         }
 
-    def _resample_for_guide(self, bars_df: pd.DataFrame, timeframe_min: int) -> pd.DataFrame:
+    def _resample_for_guide(self, bars_df: pd.DataFrame, timeframe: int | str) -> pd.DataFrame:
         frame = bars_df.copy()
         if "timestamp" not in frame.columns and "datetime" in frame.columns:
             frame["timestamp"] = pd.to_datetime(frame["datetime"], errors="coerce")
@@ -1242,7 +1600,17 @@ class SignalEngine:
         }
         if "delta" in frame.columns:
             agg["delta"] = "sum"
-        out = frame.resample(f"{timeframe_min}min").agg(agg).dropna(subset=["open"]).copy()
+        if isinstance(timeframe, int):
+            rule = f"{timeframe}min"
+        else:
+            rule = {
+                "1H": "60min",
+                "4H": "240min",
+                "1D": "1D",
+                "1W": "1W-MON",
+                "1M": "1MS",
+            }.get(str(timeframe).upper(), str(timeframe))
+        out = frame.resample(rule).agg(agg).dropna(subset=["open"]).copy()
         if out.empty:
             return out
 

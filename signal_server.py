@@ -30,10 +30,15 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).parent))
 
 import compat  # noqa: F401 — patches dataclass for Python 3.9 (before hsb)
+from env_bootstrap import load_project_env
 from signal_engine import SignalEngine
 from bar_builder import get_target_tf_min
+from daily_htf_context import DailyHTFContextService
+from intraday_llm_context import IntradayLLMContextService
 from market_snapshot_bot import MarketSnapshotBot
 from signal_execution_bot import ExecutionConfig, SignalExecutionBot
+
+load_project_env()
 
 LOG_FMT = "%(asctime)s [%(name)-14s] %(levelname)-5s  %(message)s"
 log = logging.getLogger("signal_dash")
@@ -73,6 +78,8 @@ class SignalDashboardServer:
         self.bar_tf_min = get_target_tf_min()
 
         self.engine = SignalEngine()
+        self.daily_context_service = DailyHTFContextService()
+        self.intraday_llm_service = IntradayLLMContextService()
         self.snapshot_bot = MarketSnapshotBot()
         self.execution_selector = SignalExecutionBot(ExecutionConfig())
         self.bars_df = pd.DataFrame()
@@ -114,6 +121,7 @@ class SignalDashboardServer:
         self._last_relay_emit = 0.0
         self._min_local_emit_sec = 1.0
         self._min_relay_emit_sec = 1.0
+        self._relay_bars_limit = max(200, int(os.environ.get("SIGNAL_RELAY_BARS_LIMIT", "200") or "200"))
         self.loop = None
 
     # ── WebSocket Server ──
@@ -165,6 +173,7 @@ class SignalDashboardServer:
         *,
         signals_payload: list[dict],
         market_decision: dict,
+        state: dict,
         price: float,
         atr: float,
     ) -> dict:
@@ -172,6 +181,7 @@ class SignalDashboardServer:
             ranked = self.execution_selector.rank_signals(
                 signals=signals_payload,
                 market_decision=market_decision,
+                state=state,
                 price=price,
                 atr=atr,
                 bar_index=int(self.bar_count),
@@ -461,11 +471,11 @@ class SignalDashboardServer:
         now = time.time()
         full_msg = self._safe_json(full_payload)
 
-        # Relay gets reduced payload: top 15 signals, last 200 bars, no history
+        # Relay gets reduced payload: top 15 signals, configurable bar history, no history
         if self.relay_url and (now - self._last_relay_emit >= self._min_relay_emit_sec):
             relay_payload = dict(full_payload)
             relay_payload["signals"] = full_payload.get("signals", [])[:15]
-            relay_payload["bars"] = all_bars[-200:] if all_bars else []
+            relay_payload["bars"] = all_bars[-self._relay_bars_limit:] if all_bars else []
             relay_payload["history"] = []
             relay_payload["resolved"] = full_payload.get("resolved", [])[-20:]
             relay_msg = self._safe_json(relay_payload)
@@ -653,6 +663,28 @@ class SignalDashboardServer:
             # Track trade value for tick-level VWAP (Bookmap style)
             self._bar_trade_value += tick.price * tick.size
 
+            # HSB v11.5: Dynamic Macro Boss Wakeup Triggers
+            # 1. VOLATILITY SHOCK (> 60 pts in current forming bar)
+            if bar_accum._pending_high > -float("inf") and bar_accum._pending_low < float("inf"):
+                current_range = bar_accum._pending_high - bar_accum._pending_low
+                if current_range >= 60.0:
+                    now_ts = time.time()
+                    last_shock = getattr(self, '_last_macro_shock_time', 0.0)
+                    if now_ts - last_shock >= 900:  # 15 min cooldown
+                        self._last_macro_shock_time = now_ts
+                        log.warning("🚨 VOLATILITY SHOCK (%.1f pts)! Triggering Macro Boss...", current_range)
+                        try:
+                            flag_path = Path(__file__).resolve().parent / "runtime" / "macro_event_trigger.json"
+                            flag_path.parent.mkdir(exist_ok=True)
+                            flag_path.write_text(json.dumps({
+                                "event_type": "VOLATILITY_SHOCK",
+                                "timestamp": now_ts,
+                                "price": float(tick.price),
+                                "range": current_range
+                            }))
+                        except Exception as e:
+                            log.error("Failed to write macro trigger flag: %s", e)
+
             # Track min/max price per active signal (detects SL/TP even if price bounces back)
             p = tick.price
             for sid, s in self.active_signals.items():
@@ -718,7 +750,7 @@ class SignalDashboardServer:
             return
 
         now_ts = int(time.time() * 1000)
-        price = self.current_price
+        price = float(self.current_price or 0.0)
         atr = float(self.bars_df.iloc[-1].get("atr", 20)) if not self.bars_df.empty else 20
 
         # ── PERSISTENT SIGNAL MANAGEMENT ──
@@ -848,6 +880,7 @@ class SignalDashboardServer:
         execution_view = self._build_execution_view(
             signals_payload=signals_payload,
             market_decision=market_decision,
+            state=state,
             price=price,
             atr=atr,
         )
@@ -859,6 +892,17 @@ class SignalDashboardServer:
         trader_guide["decision_ledger"] = decision_ledger
         trader_guide["execution_view"] = execution_view
         state["trader_guide"] = trader_guide
+        self._inject_daily_context(state, refresh=True)
+        self._inject_intraday_llm_context(
+            state,
+            signals_payload=signals_payload,
+            ghost_signals=ghost_signals,
+            market_decision=market_decision,
+            execution_view=execution_view,
+            decision_ledger=decision_ledger,
+            zones=zones,
+            refresh=True,
+        )
         state["decision_ledger"] = decision_ledger
         state["decision_stats"] = self._decision_stats()
         if not trader_guide.get("tf_5m") or not trader_guide.get("tf_15m"):
@@ -944,6 +988,7 @@ class SignalDashboardServer:
         execution_view = self._build_execution_view(
             signals_payload=signals_payload,
             market_decision=market_decision,
+            state=state,
             price=price,
             atr=float(self.bars_df.iloc[-1].get("atr", 20)) if not self.bars_df.empty else 20.0,
         )
@@ -955,6 +1000,17 @@ class SignalDashboardServer:
         trader_guide["decision_ledger"] = decision_ledger
         trader_guide["execution_view"] = execution_view
         state["trader_guide"] = trader_guide
+        self._inject_daily_context(state, refresh=False)
+        self._inject_intraday_llm_context(
+            state,
+            signals_payload=signals_payload,
+            ghost_signals=self._latest_ghost_signals,
+            market_decision=market_decision,
+            execution_view=execution_view,
+            decision_ledger=decision_ledger,
+            zones=self._latest_zones,
+            refresh=False,
+        )
         state["decision_ledger"] = decision_ledger
         state["decision_stats"] = self._decision_stats()
         if not trader_guide.get("tf_5m") or not trader_guide.get("tf_15m"):
@@ -1027,6 +1083,62 @@ class SignalDashboardServer:
             trader_guide["zones"] = merged_zones[:6]
         if guide.get("summary"):
             trader_guide["summary"] = f"{trader_guide.get('summary', '')} Flow: {guide['summary']}".strip()
+        state["trader_guide"] = trader_guide
+
+    def _inject_daily_context(self, state: dict, *, refresh: bool) -> None:
+        if not state:
+            return
+        trader_guide = dict(state.get("trader_guide") or {})
+        now = datetime.now()
+        if refresh:
+            context = self.daily_context_service.maybe_refresh(
+                bars_df=self.bars_df,
+                trader_guide=trader_guide,
+                current_price=float(state.get("price", self.current_price or 0.0)),
+                now=now,
+            )
+        else:
+            context = self.daily_context_service.get_context(now)
+        if context:
+            trader_guide["daily_context"] = context
+            state["daily_context"] = context
+        state["trader_guide"] = trader_guide
+
+    def _inject_intraday_llm_context(
+        self,
+        state: dict,
+        *,
+        signals_payload: list[dict],
+        ghost_signals: list[dict],
+        market_decision: dict,
+        execution_view: dict,
+        decision_ledger: list[dict],
+        zones: dict,
+        refresh: bool,
+    ) -> None:
+        if not state:
+            return
+        trader_guide = dict(state.get("trader_guide") or {})
+        payload = {
+            "state": state,
+            "signals": signals_payload,
+            "ghost_signals": ghost_signals,
+            "market_decision": market_decision,
+            "execution": execution_view,
+            "decision_ledger": decision_ledger,
+            "zones": zones,
+        }
+        if refresh:
+            context = self.intraday_llm_service.maybe_refresh(payload, now=datetime.now())
+        else:
+            context = self.intraday_llm_service.get_context(datetime.now())
+        if context:
+            trader_guide["llm_context"] = context
+            state["llm_context"] = context
+            chart_annotations = [x for x in list(context.get("chart_annotations") or []) if isinstance(x, dict)]
+            if chart_annotations:
+                merged_zones = chart_annotations + list(trader_guide.get("zones") or [])
+                trader_guide["zones"] = merged_zones[:6]
         state["trader_guide"] = trader_guide
 
     def _stabilize_l2_guide(self, guide: dict) -> dict:
